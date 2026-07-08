@@ -651,11 +651,10 @@ async def get_decor_color(message: Message, state: FSMContext):
     await message.answer("Для нового расчета нажмите /start")
     await state.clear()
 
-
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
-    print("Bot started. Открой Telegram и напиши своему боту /start")
+    print("Bot started")
     await dp.start_polling(bot)
 
-
-await main()
+if __name__ == "__main__":
+    asyncio.run(main())
