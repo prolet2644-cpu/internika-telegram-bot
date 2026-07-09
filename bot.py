@@ -1,10 +1,8 @@
 import os
 import uuid
 import asyncio
-import smtplib
 import logging
 from datetime import datetime
-from email.message import EmailMessage
 from xml.etree.ElementTree import Element, SubElement, tostring
 from xml.dom import minidom
 
@@ -17,6 +15,7 @@ from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardRemove,
     Update,
+    FSInputFile,
 )
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
@@ -37,13 +36,6 @@ WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}"
 
 LOG_SECRET = os.getenv("LOG_SECRET", "internika_log_123")
 
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-ORDER_EMAIL_TO = os.getenv("ORDER_EMAIL_TO")
-SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Internika bot")
-
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задана переменная окружения BOT_TOKEN")
@@ -61,6 +53,9 @@ LOG_FILE = "app.log"
 logger = logging.getLogger("internika_bot")
 logger.setLevel(logging.INFO)
 
+if logger.handlers:
+    logger.handlers.clear()
+
 formatter = logging.Formatter(
     fmt="%(asctime)s | %(levelname)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
@@ -72,13 +67,8 @@ stream_handler.setFormatter(formatter)
 file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
 file_handler.setFormatter(formatter)
 
-if not logger.handlers:
-    logger.addHandler(stream_handler)
-    logger.addHandler(file_handler)
-else:
-    logger.handlers.clear()
-    logger.addHandler(stream_handler)
-    logger.addHandler(file_handler)
+logger.addHandler(stream_handler)
+logger.addHandler(file_handler)
 
 
 def log_event(stage, message, **kwargs):
@@ -655,7 +645,7 @@ def format_specification(items, warnings):
 
 
 # =========================
-# XML + SMTP
+# XML
 # =========================
 
 def clean_code(value):
@@ -751,156 +741,6 @@ def save_xml_file(filename, xml_bytes):
     return file_size
 
 
-def check_smtp_env():
-    missing = []
-
-    if not SMTP_HOST:
-        missing.append("SMTP_HOST")
-
-    if not SMTP_PORT:
-        missing.append("SMTP_PORT")
-
-    if not SMTP_USER:
-        missing.append("SMTP_USER")
-
-    if not SMTP_PASSWORD:
-        missing.append("SMTP_PASSWORD")
-
-    if not ORDER_EMAIL_TO:
-        missing.append("ORDER_EMAIL_TO")
-
-    if missing:
-        raise RuntimeError(f"Не заданы SMTP-переменные: {', '.join(missing)}")
-
-
-def send_email_with_xml_sync(filename, xml_bytes, firm_code, warehouse_code, doc_number):
-    check_smtp_env()
-
-    log_event(
-        "SMTP_START",
-        "Начата отправка письма",
-        smtp_host=SMTP_HOST,
-        smtp_port=SMTP_PORT,
-        smtp_user=SMTP_USER,
-        order_email_to=ORDER_EMAIL_TO,
-        filename=filename,
-        doc_number=doc_number,
-    )
-
-    msg = EmailMessage()
-    msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_USER}>"
-    msg["To"] = ORDER_EMAIL_TO
-    msg["Subject"] = f"Заявка Internika bot: {filename}"
-
-    msg.set_content(
-        "Во вложении XML-файл заявки, сформированный ботом Internika.\n\n"
-        f"ШИФР фирмы: {firm_code}\n"
-        f"Код склада: {warehouse_code}\n"
-        f"Номер документа: {doc_number}\n"
-        f"Файл: {filename}\n"
-    )
-
-    msg.add_attachment(
-        xml_bytes,
-        maintype="application",
-        subtype="xml",
-        filename=filename,
-    )
-
-    try:
-        log_event("SMTP_CONNECT_START", "Подключение к SMTP-серверу")
-
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
-            log_event("SMTP_CONNECT_OK", "Подключение к SMTP-серверу успешно")
-
-            log_event("SMTP_EHLO_START", "EHLO до STARTTLS")
-            server.ehlo()
-            log_event("SMTP_EHLO_OK", "EHLO до STARTTLS успешно")
-
-            log_event("SMTP_STARTTLS_START", "Запуск STARTTLS")
-            server.starttls()
-            log_event("SMTP_STARTTLS_OK", "STARTTLS успешно")
-
-            log_event("SMTP_EHLO2_START", "EHLO после STARTTLS")
-            server.ehlo()
-            log_event("SMTP_EHLO2_OK", "EHLO после STARTTLS успешно")
-
-            log_event("SMTP_LOGIN_START", "Авторизация SMTP")
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            log_event("SMTP_LOGIN_OK", "Авторизация SMTP успешна")
-
-            log_event("SMTP_SEND_START", "Отправка письма")
-            server.send_message(msg)
-            log_event("SMTP_SEND_OK", "Письмо передано SMTP-серверу")
-
-        log_event(
-            "SMTP_OK",
-            "Письмо успешно отправлено",
-            filename=filename,
-            order_email_to=ORDER_EMAIL_TO,
-            doc_number=doc_number,
-        )
-
-    except smtplib.SMTPAuthenticationError as exc:
-        log_error(
-            "SMTP_AUTH_ERROR",
-            "Ошибка авторизации SMTP. Проверь SMTP_USER и SMTP_PASSWORD / пароль приложения Gmail",
-            exc=exc,
-            smtp_user=SMTP_USER,
-        )
-        raise
-
-    except smtplib.SMTPConnectError as exc:
-        log_error(
-            "SMTP_CONNECT_ERROR",
-            "Ошибка подключения к SMTP-серверу",
-            exc=exc,
-            smtp_host=SMTP_HOST,
-            smtp_port=SMTP_PORT,
-        )
-        raise
-
-    except smtplib.SMTPServerDisconnected as exc:
-        log_error(
-            "SMTP_DISCONNECTED",
-            "SMTP-сервер разорвал соединение",
-            exc=exc,
-            smtp_host=SMTP_HOST,
-            smtp_port=SMTP_PORT,
-        )
-        raise
-
-    except smtplib.SMTPException as exc:
-        log_error(
-            "SMTP_ERROR",
-            "SMTP-ошибка при отправке письма",
-            exc=exc,
-            smtp_host=SMTP_HOST,
-            smtp_port=SMTP_PORT,
-        )
-        raise
-
-    except TimeoutError as exc:
-        log_error(
-            "SMTP_TIMEOUT",
-            "Таймаут SMTP-операции",
-            exc=exc,
-            smtp_host=SMTP_HOST,
-            smtp_port=SMTP_PORT,
-        )
-        raise
-
-    except OSError as exc:
-        log_error(
-            "SMTP_OS_ERROR",
-            "Сетевая ошибка при SMTP-отправке",
-            exc=exc,
-            smtp_host=SMTP_HOST,
-            smtp_port=SMTP_PORT,
-        )
-        raise
-
-
 async def process_order_background(
     chat_id,
     user_id,
@@ -909,6 +749,8 @@ async def process_order_background(
     items,
     operation_id,
 ):
+    filename = None
+
     try:
         log_event(
             "ORDER_BACKGROUND_START",
@@ -923,20 +765,33 @@ async def process_order_background(
         filename = build_order_filename(firm_code, warehouse_code)
         xml_bytes, doc_number = build_order_xml(items, firm_code, warehouse_code)
 
-        save_xml_file(filename, xml_bytes)
+        file_size = save_xml_file(filename, xml_bytes)
 
-        await asyncio.to_thread(
-            send_email_with_xml_sync,
-            filename,
-            xml_bytes,
-            firm_code,
-            warehouse_code,
-            doc_number,
+        log_event(
+            "TG_FILE_SEND_START",
+            "Начата отправка XML-файла в Telegram",
+            operation_id=operation_id,
+            filename=filename,
+            file_size_bytes=file_size,
+        )
+
+        document = FSInputFile(filename)
+
+        await bot.send_document(
+            chat_id=chat_id,
+            document=document,
+            caption=(
+                "XML-файл заявки сформирован.\n\n"
+                f"Файл: {filename}\n"
+                f"Номер документа: {doc_number}\n"
+                f"ШИФР фирмы: {firm_code}\n"
+                f"Код склада: {warehouse_code}"
+            ),
         )
 
         log_event(
-            "ORDER_OK",
-            "Заявка успешно сформирована и отправлена",
+            "TG_FILE_SEND_OK",
+            "XML-файл успешно отправлен в Telegram",
             operation_id=operation_id,
             filename=filename,
             doc_number=doc_number,
@@ -944,25 +799,31 @@ async def process_order_background(
 
         await bot.send_message(
             chat_id,
-            "Заявка успешно сформирована и отправлена.\n\n"
-            f"Файл: {filename}\n"
-            f"Номер документа: {doc_number}\n\n"
             "Для нового расчета нажмите /start",
+        )
+
+        log_event(
+            "ORDER_OK",
+            "Заявка успешно сформирована и файл отправлен пользователю",
+            operation_id=operation_id,
+            filename=filename,
+            doc_number=doc_number,
         )
 
     except Exception as exc:
         log_error(
             "ORDER_ERROR",
-            "Ошибка при создании или отправке заявки",
+            "Ошибка при создании или отправке XML-файла в Telegram",
             exc=exc,
             operation_id=operation_id,
             firm_code=firm_code,
             warehouse_code=warehouse_code,
+            filename=filename,
         )
 
         await bot.send_message(
             chat_id,
-            "Ошибка при формировании или отправке заявки.\n\n"
+            "Ошибка при формировании XML-файла.\n\n"
             f"ID операции: {operation_id}\n"
             "Проверь Render Logs или страницу /logs.",
         )
@@ -1148,7 +1009,7 @@ async def get_decor_color(message: Message, state: FSMContext):
 
         await message.answer(
             "Что сделать дальше?",
-            reply_markup=kb(["Отправить заявку", "Новый расчет"]),
+            reply_markup=kb(["Сформировать XML", "Новый расчет"]),
         )
 
         await state.set_state(CalcStates.after_calc)
@@ -1181,7 +1042,7 @@ async def after_calc_action(message: Message, state: FSMContext):
 
         return
 
-    if message.text == "Отправить заявку":
+    if message.text == "Сформировать XML":
         data = await state.get_data()
         items = data.get("last_items", [])
 
@@ -1243,7 +1104,7 @@ async def get_warehouse_code(message: Message, state: FSMContext):
 
     log_event(
         "ORDER_START",
-        "Начато создание заявки",
+        "Начато формирование XML-файла",
         operation_id=operation_id,
         user_id=info["user_id"],
         firm_code=firm_code,
@@ -1252,8 +1113,7 @@ async def get_warehouse_code(message: Message, state: FSMContext):
     )
 
     await message.answer(
-        "Заявка принята в обработку.\n"
-        "Формирую XML и отправляю на почту.\n\n"
+        "Формирую XML-файл.\n\n"
         f"ID операции: {operation_id}",
         reply_markup=ReplyKeyboardRemove(),
     )
