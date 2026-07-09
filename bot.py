@@ -1,12 +1,12 @@
 import os
 import uuid
 import asyncio
+import smtplib
 import logging
 from datetime import datetime
+from email.message import EmailMessage
 from xml.etree.ElementTree import Element, SubElement, tostring
 from xml.dom import minidom
-
-from aiohttp import web
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import (
@@ -14,7 +14,6 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardRemove,
-    Update,
     FSInputFile,
 )
 from aiogram.filters import CommandStart, Command
@@ -28,27 +27,23 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # =========================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.getenv("PORT", "10000"))
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "internika_secret_123")
-WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}"
-
-LOG_SECRET = os.getenv("LOG_SECRET", "internika_log_123")
-
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+ORDER_EMAIL_TO = os.getenv("ORDER_EMAIL_TO")
+SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Internika bot")
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задана переменная окружения BOT_TOKEN")
-
-if not WEBHOOK_URL:
-    raise RuntimeError("Не задана переменная окружения WEBHOOK_URL")
 
 
 # =========================
 # LOGGING
 # =========================
 
-LOG_FILE = "app.log"
+LOG_FILE = "/tmp/app.log"
 
 logger = logging.getLogger("internika_bot")
 logger.setLevel(logging.INFO)
@@ -110,335 +105,68 @@ def user_info(message: Message):
 
 # =========================
 # Справочники Internika
-# MVP: поворотно-откидная створка, ручка средняя / переменная
 # =========================
 
 MAIN_LOCKS_VARIABLE = [
-    {
-        "vsf_min": 420,
-        "vsf_max": 600,
-        "sku": "1077172",
-        "name": "Запор основной поворотно-откидной средний",
-        "angle_qty": 0,
-        "response_qty": 0,
-    },
-    {
-        "vsf_min": 601,
-        "vsf_max": 1000,
-        "sku": "1088438",
-        "name": "Запор основной поворотно-откидной средний",
-        "angle_qty": 1,
-        "response_qty": 1,
-    },
-    {
-        "vsf_min": 901,
-        "vsf_max": 1400,
-        "sku": "1088439",
-        "name": "Запор основной поворотно-откидной средний",
-        "angle_qty": 1,
-        "response_qty": 1,
-    },
-    {
-        "vsf_min": 1401,
-        "vsf_max": 1800,
-        "sku": "1088440",
-        "name": "Запор основной поворотно-откидной средний",
-        "angle_qty": 1,
-        "response_qty": 1,
-    },
-    {
-        "vsf_min": 1601,
-        "vsf_max": 2000,
-        "sku": "1088441",
-        "name": "Запор основной поворотно-откидной средний",
-        "angle_qty": 2,
-        "response_qty": 2,
-    },
-    {
-        "vsf_min": 2001,
-        "vsf_max": 2400,
-        "sku": "1088442",
-        "name": "Запор основной поворотно-откидной средний",
-        "angle_qty": 2,
-        "response_qty": 2,
-    },
+    {"vsf_min": 420, "vsf_max": 600, "sku": "1077172", "name": "Запор основной поворотно-откидной средний", "angle_qty": 0, "response_qty": 0},
+    {"vsf_min": 601, "vsf_max": 1000, "sku": "1088438", "name": "Запор основной поворотно-откидной средний", "angle_qty": 1, "response_qty": 1},
+    {"vsf_min": 901, "vsf_max": 1400, "sku": "1088439", "name": "Запор основной поворотно-откидной средний", "angle_qty": 1, "response_qty": 1},
+    {"vsf_min": 1401, "vsf_max": 1800, "sku": "1088440", "name": "Запор основной поворотно-откидной средний", "angle_qty": 1, "response_qty": 1},
+    {"vsf_min": 1601, "vsf_max": 2000, "sku": "1088441", "name": "Запор основной поворотно-откидной средний", "angle_qty": 2, "response_qty": 2},
+    {"vsf_min": 2001, "vsf_max": 2400, "sku": "1088442", "name": "Запор основной поворотно-откидной средний", "angle_qty": 2, "response_qty": 2},
 ]
 
 
 SASH_SCISSORS = [
-    {
-        "shf_min": 325,
-        "shf_max": 610,
-        "sku": "1077031",
-        "name": "Ножницы на створке 250/470",
-        "response_qty": 0,
-    },
-    {
-        "shf_min": 611,
-        "shf_max": 810,
-        "sku": "1077032",
-        "name": "Ножницы на створке 350/670",
-        "response_qty": 0,
-    },
-    {
-        "shf_min": 811,
-        "shf_max": 1010,
-        "sku": "1077033",
-        "name": "Ножницы на створке 500/870",
-        "response_qty": 1,
-    },
-    {
-        "shf_min": 1011,
-        "shf_max": 1210,
-        "sku": "1077034",
-        "name": "Ножницы на створке 500/1070",
-        "response_qty": 1,
-    },
-    {
-        "shf_min": 1211,
-        "shf_max": 1410,
-        "sku": "1077035",
-        "name": "Ножницы на створке 500/1270",
-        "response_qty": 1,
-    },
-    {
-        "shf_min": 1411,
-        "shf_max": 1600,
-        "sku": "1077036",
-        "name": "Ножницы на створке 500/1470",
-        "response_qty": 1,
-    },
+    {"shf_min": 325, "shf_max": 610, "sku": "1077031", "name": "Ножницы на створке 250/470", "response_qty": 0},
+    {"shf_min": 611, "shf_max": 810, "sku": "1077032", "name": "Ножницы на створке 350/670", "response_qty": 0},
+    {"shf_min": 811, "shf_max": 1010, "sku": "1077033", "name": "Ножницы на створке 500/870", "response_qty": 1},
+    {"shf_min": 1011, "shf_max": 1210, "sku": "1077034", "name": "Ножницы на створке 500/1070", "response_qty": 1},
+    {"shf_min": 1211, "shf_max": 1410, "sku": "1077035", "name": "Ножницы на створке 500/1270", "response_qty": 1},
+    {"shf_min": 1411, "shf_max": 1600, "sku": "1077036", "name": "Ножницы на створке 500/1470", "response_qty": 1},
 ]
 
 
 FRAME_SCISSORS = [
-    {
-        "system": "12/20-9",
-        "shf_min": 325,
-        "shf_max": 610,
-        "side": "Левое",
-        "sku": "1088661",
-        "name": "Ножницы на раме 12/20-9 250 левое",
-    },
-    {
-        "system": "12/20-9",
-        "shf_min": 325,
-        "shf_max": 610,
-        "side": "Правое",
-        "sku": "1088662",
-        "name": "Ножницы на раме 12/20-9 250 правое",
-    },
-    {
-        "system": "12/20-9",
-        "shf_min": 611,
-        "shf_max": 810,
-        "side": "Левое",
-        "sku": "1088663",
-        "name": "Ножницы на раме 12/20-9 350 левое",
-    },
-    {
-        "system": "12/20-9",
-        "shf_min": 611,
-        "shf_max": 810,
-        "side": "Правое",
-        "sku": "1088664",
-        "name": "Ножницы на раме 12/20-9 350 правое",
-    },
-    {
-        "system": "12/20-9",
-        "shf_min": 811,
-        "shf_max": 1600,
-        "side": "Левое",
-        "sku": "1088665",
-        "name": "Ножницы на раме 12/20-9 500 левое",
-    },
-    {
-        "system": "12/20-9",
-        "shf_min": 811,
-        "shf_max": 1600,
-        "side": "Правое",
-        "sku": "1088666",
-        "name": "Ножницы на раме 12/20-9 500 правое",
-    },
-    {
-        "system": "12/20-13",
-        "shf_min": 325,
-        "shf_max": 610,
-        "side": "Левое",
-        "sku": "1088667",
-        "name": "Ножницы на раме 12/20-13 250 левое",
-    },
-    {
-        "system": "12/20-13",
-        "shf_min": 325,
-        "shf_max": 610,
-        "side": "Правое",
-        "sku": "1088668",
-        "name": "Ножницы на раме 12/20-13 250 правое",
-    },
-    {
-        "system": "12/20-13",
-        "shf_min": 611,
-        "shf_max": 810,
-        "side": "Левое",
-        "sku": "1088669",
-        "name": "Ножницы на раме 12/20-13 350 левое",
-    },
-    {
-        "system": "12/20-13",
-        "shf_min": 611,
-        "shf_max": 810,
-        "side": "Правое",
-        "sku": "1088670",
-        "name": "Ножницы на раме 12/20-13 350 правое",
-    },
-    {
-        "system": "12/20-13",
-        "shf_min": 811,
-        "shf_max": 1600,
-        "side": "Левое",
-        "sku": "1088671",
-        "name": "Ножницы на раме 12/20-13 500 левое",
-    },
-    {
-        "system": "12/20-13",
-        "shf_min": 811,
-        "shf_max": 1600,
-        "side": "Правое",
-        "sku": "1088672",
-        "name": "Ножницы на раме 12/20-13 500 правое",
-    },
-    {
-        "system": "12/22-13",
-        "shf_min": 325,
-        "shf_max": 610,
-        "side": "Левое",
-        "sku": "1088673",
-        "name": "Ножницы на раме 12/22-13 250 левое",
-    },
-    {
-        "system": "12/22-13",
-        "shf_min": 325,
-        "shf_max": 610,
-        "side": "Правое",
-        "sku": "1088674",
-        "name": "Ножницы на раме 12/22-13 250 правое",
-    },
-    {
-        "system": "12/22-13",
-        "shf_min": 611,
-        "shf_max": 810,
-        "side": "Левое",
-        "sku": "1088675",
-        "name": "Ножницы на раме 12/22-13 350 левое",
-    },
-    {
-        "system": "12/22-13",
-        "shf_min": 611,
-        "shf_max": 810,
-        "side": "Правое",
-        "sku": "1088676",
-        "name": "Ножницы на раме 12/22-13 350 правое",
-    },
-    {
-        "system": "12/22-13",
-        "shf_min": 811,
-        "shf_max": 1600,
-        "side": "Левое",
-        "sku": "1088677",
-        "name": "Ножницы на раме 12/22-13 500 левое",
-    },
-    {
-        "system": "12/22-13",
-        "shf_min": 811,
-        "shf_max": 1600,
-        "side": "Правое",
-        "sku": "1088678",
-        "name": "Ножницы на раме 12/22-13 500 правое",
-    },
+    {"system": "12/20-9", "shf_min": 325, "shf_max": 610, "side": "Левое", "sku": "1088661", "name": "Ножницы на раме 12/20-9 250 левое"},
+    {"system": "12/20-9", "shf_min": 325, "shf_max": 610, "side": "Правое", "sku": "1088662", "name": "Ножницы на раме 12/20-9 250 правое"},
+    {"system": "12/20-9", "shf_min": 611, "shf_max": 810, "side": "Левое", "sku": "1088663", "name": "Ножницы на раме 12/20-9 350 левое"},
+    {"system": "12/20-9", "shf_min": 611, "shf_max": 810, "side": "Правое", "sku": "1088664", "name": "Ножницы на раме 12/20-9 350 правое"},
+    {"system": "12/20-9", "shf_min": 811, "shf_max": 1600, "side": "Левое", "sku": "1088665", "name": "Ножницы на раме 12/20-9 500 левое"},
+    {"system": "12/20-9", "shf_min": 811, "shf_max": 1600, "side": "Правое", "sku": "1088666", "name": "Ножницы на раме 12/20-9 500 правое"},
+
+    {"system": "12/20-13", "shf_min": 325, "shf_max": 610, "side": "Левое", "sku": "1088667", "name": "Ножницы на раме 12/20-13 250 левое"},
+    {"system": "12/20-13", "shf_min": 325, "shf_max": 610, "side": "Правое", "sku": "1088668", "name": "Ножницы на раме 12/20-13 250 правое"},
+    {"system": "12/20-13", "shf_min": 611, "shf_max": 810, "side": "Левое", "sku": "1088669", "name": "Ножницы на раме 12/20-13 350 левое"},
+    {"system": "12/20-13", "shf_min": 611, "shf_max": 810, "side": "Правое", "sku": "1088670", "name": "Ножницы на раме 12/20-13 350 правое"},
+    {"system": "12/20-13", "shf_min": 811, "shf_max": 1600, "side": "Левое", "sku": "1088671", "name": "Ножницы на раме 12/20-13 500 левое"},
+    {"system": "12/20-13", "shf_min": 811, "shf_max": 1600, "side": "Правое", "sku": "1088672", "name": "Ножницы на раме 12/20-13 500 правое"},
+
+    {"system": "12/22-13", "shf_min": 325, "shf_max": 610, "side": "Левое", "sku": "1088673", "name": "Ножницы на раме 12/22-13 250 левое"},
+    {"system": "12/22-13", "shf_min": 325, "shf_max": 610, "side": "Правое", "sku": "1088674", "name": "Ножницы на раме 12/22-13 250 правое"},
+    {"system": "12/22-13", "shf_min": 611, "shf_max": 810, "side": "Левое", "sku": "1088675", "name": "Ножницы на раме 12/22-13 350 левое"},
+    {"system": "12/22-13", "shf_min": 611, "shf_max": 810, "side": "Правое", "sku": "1088676", "name": "Ножницы на раме 12/22-13 350 правое"},
+    {"system": "12/22-13", "shf_min": 811, "shf_max": 1600, "side": "Левое", "sku": "1088677", "name": "Ножницы на раме 12/22-13 500 левое"},
+    {"system": "12/22-13", "shf_min": 811, "shf_max": 1600, "side": "Правое", "sku": "1088678", "name": "Ножницы на раме 12/22-13 500 правое"},
 ]
 
 
 MIDDLE_LOCKS = [
-    {
-        "shf_min": 400,
-        "shf_max": 700,
-        "vsf_min": None,
-        "vsf_max": None,
-        "sku": "1086563",
-        "name": "Запор средний 300/350",
-        "response_qty": 1,
-    },
-    {
-        "shf_min": 701,
-        "shf_max": 1200,
-        "vsf_min": 701,
-        "vsf_max": 1200,
-        "sku": "1077050",
-        "name": "Запор средний 500/550",
-        "response_qty": 2,
-    },
-    {
-        "shf_min": 1201,
-        "shf_max": 1600,
-        "vsf_min": 1201,
-        "vsf_max": 1600,
-        "sku": "1077051",
-        "name": "Запор средний 800/850",
-        "response_qty": 2,
-    },
-    {
-        "shf_min": None,
-        "shf_max": None,
-        "vsf_min": 1601,
-        "vsf_max": 2200,
-        "sku": "1077052",
-        "name": "Запор средний 1450/1550",
-        "response_qty": 3,
-    },
-    {
-        "shf_min": None,
-        "shf_max": None,
-        "vsf_min": 2201,
-        "vsf_max": 2400,
-        "sku": "1080211",
-        "name": "Запор средний 1950/2000",
-        "response_qty": 4,
-    },
+    {"shf_min": 400, "shf_max": 700, "vsf_min": None, "vsf_max": None, "sku": "1086563", "name": "Запор средний 300/350", "response_qty": 1},
+    {"shf_min": 701, "shf_max": 1200, "vsf_min": 701, "vsf_max": 1200, "sku": "1077050", "name": "Запор средний 500/550", "response_qty": 2},
+    {"shf_min": 1201, "shf_max": 1600, "vsf_min": 1201, "vsf_max": 1600, "sku": "1077051", "name": "Запор средний 800/850", "response_qty": 2},
+    {"shf_min": None, "shf_max": None, "vsf_min": 1601, "vsf_max": 2200, "sku": "1077052", "name": "Запор средний 1450/1550", "response_qty": 3},
+    {"shf_min": None, "shf_max": None, "vsf_min": 2201, "vsf_max": 2400, "sku": "1080211", "name": "Запор средний 1950/2000", "response_qty": 4},
 ]
 
 
 RESPONSE_PLATE_PROFILES = {
-    "12/20 13, +2 мм": {
-        "tilt_turn": "1087144",
-        "regular": "1077244",
-        "blocker_stop": None,
-    },
-    "12/20 13, +3,3 мм": {
-        "tilt_turn": "1087832",
-        "regular": "1087833",
-        "blocker_stop": None,
-    },
-    "12/20 9, +1 мм": {
-        "tilt_turn": "1088578",
-        "regular": "1082730",
-        "blocker_stop": None,
-    },
-    "Aluplast/Rehau": {
-        "tilt_turn": "1077239",
-        "regular": "1077245",
-        "blocker_stop": "1077298",
-    },
-    "Veka": {
-        "tilt_turn": "1077237",
-        "regular": "1077243",
-        "blocker_stop": "1084777",
-    },
-    "KBE 70 AD": {
-        "tilt_turn": "1077240",
-        "regular": "1077246",
-        "blocker_stop": "1077294",
-    },
+    "12/20 13, +2 мм": {"tilt_turn": "1087144", "regular": "1077244", "blocker_stop": None},
+    "12/20 13, +3,3 мм": {"tilt_turn": "1087832", "regular": "1087833", "blocker_stop": None},
+    "12/20 9, +1 мм": {"tilt_turn": "1088578", "regular": "1082730", "blocker_stop": None},
+    "Aluplast/Rehau": {"tilt_turn": "1077239", "regular": "1077245", "blocker_stop": "1077298"},
+    "Veka": {"tilt_turn": "1077237", "regular": "1077243", "blocker_stop": "1084777"},
+    "KBE 70 AD": {"tilt_turn": "1077240", "regular": "1077246", "blocker_stop": "1077294"},
 }
 
 
@@ -477,13 +205,7 @@ def add_item(items, sku, name, qty=1):
     if qty is None or int(qty) <= 0:
         return
 
-    items.append(
-        {
-            "sku": str(sku),
-            "name": name,
-            "qty": int(qty),
-        }
-    )
+    items.append({"sku": str(sku), "name": name, "qty": int(qty)})
 
 
 def aggregate_items(items):
@@ -493,11 +215,7 @@ def aggregate_items(items):
         key = (item["sku"], item["name"])
 
         if key not in result:
-            result[key] = {
-                "sku": item["sku"],
-                "name": item["name"],
-                "qty": 0,
-            }
+            result[key] = {"sku": item["sku"], "name": item["name"], "qty": 0}
 
         result[key]["qty"] += item["qty"]
 
@@ -645,7 +363,7 @@ def format_specification(items, warnings):
 
 
 # =========================
-# XML
+# XML + SMTP
 # =========================
 
 def clean_code(value):
@@ -679,7 +397,6 @@ def build_order_xml(items, firm_code, warehouse_code):
         raise RuntimeError("Нет товарных позиций для формирования XML")
 
     root = Element("КоммерческаяИнформация")
-
     doc_number = f"IB{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
     doc = SubElement(
@@ -694,18 +411,14 @@ def build_order_xml(items, firm_code, warehouse_code):
     )
 
     for item in items:
-        sku = str(item["sku"]).strip()
-        qty = str(int(item["qty"]))
-        name = str(item["name"]).strip()
-
         SubElement(
             doc,
             "ТоварнаяПозиция",
             {
                 "Единица": "шт",
-                "Количество": qty,
-                "Товар": sku,
-                "Описание": name,
+                "Количество": str(int(item["qty"])),
+                "Товар": str(item["sku"]).strip(),
+                "Описание": str(item["name"]).strip(),
             },
         )
 
@@ -724,21 +437,174 @@ def build_order_xml(items, firm_code, warehouse_code):
 
 
 def save_xml_file(filename, xml_bytes):
-    log_event("XML_SAVE_START", "Начато сохранение XML", filename=filename)
+    safe_path = os.path.join("/tmp", filename)
 
-    with open(filename, "wb") as file:
+    log_event("XML_SAVE_START", "Начато сохранение XML", filename=safe_path)
+
+    with open(safe_path, "wb") as file:
         file.write(xml_bytes)
 
-    file_size = os.path.getsize(filename)
+    file_size = os.path.getsize(safe_path)
 
     log_event(
         "XML_SAVE_OK",
         "XML сохранен",
-        filename=filename,
+        filename=safe_path,
         file_size_bytes=file_size,
     )
 
-    return file_size
+    return safe_path, file_size
+
+
+def check_smtp_env():
+    missing = []
+
+    if not SMTP_HOST:
+        missing.append("SMTP_HOST")
+
+    if not SMTP_PORT:
+        missing.append("SMTP_PORT")
+
+    if not SMTP_USER:
+        missing.append("SMTP_USER")
+
+    if not SMTP_PASSWORD:
+        missing.append("SMTP_PASSWORD")
+
+    if not ORDER_EMAIL_TO:
+        missing.append("ORDER_EMAIL_TO")
+
+    if missing:
+        raise RuntimeError(f"Не заданы SMTP-переменные: {', '.join(missing)}")
+
+
+def send_email_with_xml_sync(filename, file_path, xml_bytes, firm_code, warehouse_code, doc_number):
+    check_smtp_env()
+
+    log_event(
+        "SMTP_START",
+        "Начата отправка письма",
+        smtp_host=SMTP_HOST,
+        smtp_port=SMTP_PORT,
+        smtp_user=SMTP_USER,
+        order_email_to=ORDER_EMAIL_TO,
+        filename=filename,
+        file_path=file_path,
+        doc_number=doc_number,
+    )
+
+    msg = EmailMessage()
+    msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_USER}>"
+    msg["To"] = ORDER_EMAIL_TO
+    msg["Subject"] = f"Заявка Internika bot: {filename}"
+
+    msg.set_content(
+        "Во вложении XML-файл заявки, сформированный ботом Internika.\n\n"
+        f"ШИФР фирмы: {firm_code}\n"
+        f"Код склада: {warehouse_code}\n"
+        f"Номер документа: {doc_number}\n"
+        f"Файл: {filename}\n"
+    )
+
+    msg.add_attachment(
+        xml_bytes,
+        maintype="application",
+        subtype="xml",
+        filename=filename,
+    )
+
+    try:
+        log_event("SMTP_CONNECT_START", "Подключение к SMTP-серверу")
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+            log_event("SMTP_CONNECT_OK", "Подключение к SMTP-серверу успешно")
+
+            log_event("SMTP_EHLO_START", "EHLO до STARTTLS")
+            server.ehlo()
+            log_event("SMTP_EHLO_OK", "EHLO до STARTTLS успешно")
+
+            log_event("SMTP_STARTTLS_START", "Запуск STARTTLS")
+            server.starttls()
+            log_event("SMTP_STARTTLS_OK", "STARTTLS успешно")
+
+            log_event("SMTP_EHLO2_START", "EHLO после STARTTLS")
+            server.ehlo()
+            log_event("SMTP_EHLO2_OK", "EHLO после STARTTLS успешно")
+
+            log_event("SMTP_LOGIN_START", "Авторизация SMTP")
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            log_event("SMTP_LOGIN_OK", "Авторизация SMTP успешна")
+
+            log_event("SMTP_SEND_START", "Отправка письма")
+            server.send_message(msg)
+            log_event("SMTP_SEND_OK", "Письмо передано SMTP-серверу")
+
+        log_event(
+            "SMTP_OK",
+            "Письмо успешно отправлено",
+            filename=filename,
+            order_email_to=ORDER_EMAIL_TO,
+            doc_number=doc_number,
+        )
+
+    except smtplib.SMTPAuthenticationError as exc:
+        log_error(
+            "SMTP_AUTH_ERROR",
+            "Ошибка авторизации SMTP. Проверь SMTP_USER и SMTP_PASSWORD / пароль приложения Gmail",
+            exc=exc,
+            smtp_user=SMTP_USER,
+        )
+        raise
+
+    except smtplib.SMTPConnectError as exc:
+        log_error(
+            "SMTP_CONNECT_ERROR",
+            "Ошибка подключения к SMTP-серверу",
+            exc=exc,
+            smtp_host=SMTP_HOST,
+            smtp_port=SMTP_PORT,
+        )
+        raise
+
+    except smtplib.SMTPServerDisconnected as exc:
+        log_error(
+            "SMTP_DISCONNECTED",
+            "SMTP-сервер разорвал соединение",
+            exc=exc,
+            smtp_host=SMTP_HOST,
+            smtp_port=SMTP_PORT,
+        )
+        raise
+
+    except smtplib.SMTPException as exc:
+        log_error(
+            "SMTP_ERROR",
+            "SMTP-ошибка при отправке письма",
+            exc=exc,
+            smtp_host=SMTP_HOST,
+            smtp_port=SMTP_PORT,
+        )
+        raise
+
+    except TimeoutError as exc:
+        log_error(
+            "SMTP_TIMEOUT",
+            "Таймаут SMTP-операции",
+            exc=exc,
+            smtp_host=SMTP_HOST,
+            smtp_port=SMTP_PORT,
+        )
+        raise
+
+    except OSError as exc:
+        log_error(
+            "SMTP_OS_ERROR",
+            "Сетевая ошибка при SMTP-отправке",
+            exc=exc,
+            smtp_host=SMTP_HOST,
+            smtp_port=SMTP_PORT,
+        )
+        raise
 
 
 async def process_order_background(
@@ -750,6 +616,8 @@ async def process_order_background(
     operation_id,
 ):
     filename = None
+    file_path = None
+    doc_number = None
 
     try:
         log_event(
@@ -764,69 +632,92 @@ async def process_order_background(
 
         filename = build_order_filename(firm_code, warehouse_code)
         xml_bytes, doc_number = build_order_xml(items, firm_code, warehouse_code)
+        file_path, file_size = save_xml_file(filename, xml_bytes)
 
-        file_size = save_xml_file(filename, xml_bytes)
-
-        log_event(
-            "TG_FILE_SEND_START",
-            "Начата отправка XML-файла в Telegram",
-            operation_id=operation_id,
-            filename=filename,
-            file_size_bytes=file_size,
+        await bot.send_message(
+            chat_id,
+            "XML сформирован. Отправляю письмо через SMTP...",
         )
 
-        document = FSInputFile(filename)
-
-        await bot.send_document(
-            chat_id=chat_id,
-            document=document,
-            caption=(
-                "XML-файл заявки сформирован.\n\n"
-                f"Файл: {filename}\n"
-                f"Номер документа: {doc_number}\n"
-                f"ШИФР фирмы: {firm_code}\n"
-                f"Код склада: {warehouse_code}"
-            ),
-        )
-
-        log_event(
-            "TG_FILE_SEND_OK",
-            "XML-файл успешно отправлен в Telegram",
-            operation_id=operation_id,
-            filename=filename,
-            doc_number=doc_number,
+        await asyncio.to_thread(
+            send_email_with_xml_sync,
+            filename,
+            file_path,
+            xml_bytes,
+            firm_code,
+            warehouse_code,
+            doc_number,
         )
 
         await bot.send_message(
             chat_id,
+            "Заявка успешно сформирована и отправлена на почту.\n\n"
+            f"Файл: {filename}\n"
+            f"Номер документа: {doc_number}\n"
+            f"Получатель: {ORDER_EMAIL_TO}\n\n"
             "Для нового расчета нажмите /start",
+        )
+
+        document = FSInputFile(file_path, filename=filename)
+
+        await bot.send_document(
+            chat_id=chat_id,
+            document=document,
+            caption="Копия XML-файла заявки.",
         )
 
         log_event(
             "ORDER_OK",
-            "Заявка успешно сформирована и файл отправлен пользователю",
+            "Заявка успешно сформирована и отправлена",
             operation_id=operation_id,
             filename=filename,
+            file_path=file_path,
             doc_number=doc_number,
+            order_email_to=ORDER_EMAIL_TO,
         )
 
     except Exception as exc:
         log_error(
             "ORDER_ERROR",
-            "Ошибка при создании или отправке XML-файла в Telegram",
+            "Ошибка при создании или отправке заявки",
             exc=exc,
             operation_id=operation_id,
             firm_code=firm_code,
             warehouse_code=warehouse_code,
             filename=filename,
+            file_path=file_path,
+            doc_number=doc_number,
         )
+
+        error_text = str(exc)
 
         await bot.send_message(
             chat_id,
-            "Ошибка при формировании XML-файла.\n\n"
+            "Ошибка при формировании или отправке заявки.\n\n"
             f"ID операции: {operation_id}\n"
-            "Проверь Render Logs или страницу /logs.",
+            f"Ошибка: {error_text}\n\n"
+            "Проверь логи Amvera.",
         )
+
+        if file_path and os.path.exists(file_path):
+            try:
+                document = FSInputFile(file_path, filename=filename)
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=document,
+                    caption=(
+                        "XML-файл был сформирован, но письмо не отправилось.\n"
+                        "Отправляю файл сюда для проверки."
+                    ),
+                )
+            except Exception as send_doc_exc:
+                log_error(
+                    "TG_FILE_SEND_AFTER_ERROR",
+                    "Не удалось отправить XML в Telegram после SMTP-ошибки",
+                    exc=send_doc_exc,
+                    operation_id=operation_id,
+                    file_path=file_path,
+                )
 
 
 # =========================
@@ -1009,7 +900,7 @@ async def get_decor_color(message: Message, state: FSMContext):
 
         await message.answer(
             "Что сделать дальше?",
-            reply_markup=kb(["Сформировать XML", "Новый расчет"]),
+            reply_markup=kb(["Отправить заявку на почту", "Новый расчет"]),
         )
 
         await state.set_state(CalcStates.after_calc)
@@ -1025,7 +916,7 @@ async def get_decor_color(message: Message, state: FSMContext):
         )
 
         await message.answer(
-            "Ошибка при расчете. Подробности смотри в Render Logs или /logs.",
+            "Ошибка при расчете. Подробности смотри в логах Amvera.",
             reply_markup=ReplyKeyboardRemove(),
         )
 
@@ -1042,7 +933,7 @@ async def after_calc_action(message: Message, state: FSMContext):
 
         return
 
-    if message.text == "Сформировать XML":
+    if message.text == "Отправить заявку на почту":
         data = await state.get_data()
         items = data.get("last_items", [])
 
@@ -1099,12 +990,11 @@ async def get_warehouse_code(message: Message, state: FSMContext):
     items = data.get("last_items", [])
 
     info = user_info(message)
-
     operation_id = str(uuid.uuid4())[:8]
 
     log_event(
         "ORDER_START",
-        "Начато формирование XML-файла",
+        "Начато формирование и отправка заявки",
         operation_id=operation_id,
         user_id=info["user_id"],
         firm_code=firm_code,
@@ -1113,7 +1003,7 @@ async def get_warehouse_code(message: Message, state: FSMContext):
     )
 
     await message.answer(
-        "Формирую XML-файл.\n\n"
+        "Формирую XML и отправляю заявку на почту.\n\n"
         f"ID операции: {operation_id}",
         reply_markup=ReplyKeyboardRemove(),
     )
@@ -1133,87 +1023,18 @@ async def get_warehouse_code(message: Message, state: FSMContext):
 
 
 # =========================
-# Webhook server
+# Запуск polling
 # =========================
 
-async def healthcheck(request):
-    return web.Response(text="Internika Telegram Bot is running")
-
-
-async def logs_view(request):
-    key = request.query.get("key")
-
-    if key != LOG_SECRET:
-        return web.Response(status=403, text="Forbidden")
-
-    try:
-        if not os.path.exists(LOG_FILE):
-            return web.Response(text="Лог-файл пока не создан.")
-
-        with open(LOG_FILE, "r", encoding="utf-8") as file:
-            lines = file.readlines()
-
-        last_lines = lines[-500:]
-
-        return web.Response(
-            text="".join(last_lines),
-            content_type="text/plain",
-            charset="utf-8",
-        )
-
-    except Exception as exc:
-        return web.Response(status=500, text=f"Ошибка чтения логов: {exc}")
-
-
-async def telegram_webhook(request):
-    try:
-        data = await request.json()
-        update = Update.model_validate(data, context={"bot": bot})
-        await dp.feed_update(bot, update)
-
-    except Exception as exc:
-        log_error("WEBHOOK_ERROR", "Ошибка обработки webhook", exc=exc)
-
-    return web.Response(text="OK")
-
-
-async def on_startup(app):
-    webhook_full_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+async def main():
+    log_event("APP_START", "Запуск polling-бота Amvera + SMTP")
 
     await bot.delete_webhook(drop_pending_updates=True)
 
-    await bot.set_webhook(
-        url=webhook_full_url,
-        drop_pending_updates=True,
-    )
+    log_event("POLLING_START", "Polling запущен")
 
-    log_event("WEBHOOK_SET", "Webhook установлен", webhook_url=webhook_full_url)
-
-
-async def on_shutdown(app):
-    await bot.session.close()
-    log_event("BOT_SHUTDOWN", "Сессия бота закрыта")
-
-
-def create_app():
-    app = web.Application()
-
-    app.router.add_get("/", healthcheck)
-    app.router.add_get("/health", healthcheck)
-    app.router.add_get("/logs", logs_view)
-    app.router.add_post(WEBHOOK_PATH, telegram_webhook)
-
-    app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
-
-    return app
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    log_event("APP_START", "Запуск приложения", port=PORT)
-
-    web.run_app(
-        create_app(),
-        host="0.0.0.0",
-        port=PORT,
-    )
+    asyncio.run(main())
