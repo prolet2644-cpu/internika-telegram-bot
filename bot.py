@@ -1,9 +1,8 @@
-!pip install -q -U aiogram nest_asyncio pandas
-
+import os
 import asyncio
-import nest_asyncio
-import pandas as pd
-from getpass import getpass
+from collections import defaultdict
+
+from aiohttp import web
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
@@ -13,14 +12,20 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 
-nest_asyncio.apply()
+# =========================
+# ENV
+# =========================
 
-BOT_TOKEN = os.getenv("8862946438:AAFzsdld7LfxisEX7kOlxsn1_ue_iroKxyc")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.getenv("PORT", "10000"))
+
+if not BOT_TOKEN:
+    raise RuntimeError("Не задана переменная окружения BOT_TOKEN")
 
 
 # =========================
 # Справочники Internika
-# MVP: поворотно-откидная створка, ручка средняя/переменная
+# MVP: поворотно-откидная створка, ручка средняя / переменная
 # =========================
 
 MAIN_LOCKS_VARIABLE = [
@@ -380,7 +385,7 @@ def find_first(rows, predicate):
 
 
 def add_item(items, sku, name, qty=1):
-    if sku is None:
+    if not sku:
         return
 
     if qty is None or int(qty) <= 0:
@@ -388,11 +393,29 @@ def add_item(items, sku, name, qty=1):
 
     items.append(
         {
-            "Артикул": str(sku),
-            "Наименование": name,
-            "Кол-во": int(qty),
+            "sku": str(sku),
+            "name": name,
+            "qty": int(qty),
         }
     )
+
+
+def aggregate_items(items):
+    result = {}
+
+    for item in items:
+        key = (item["sku"], item["name"])
+
+        if key not in result:
+            result[key] = {
+                "sku": item["sku"],
+                "name": item["name"],
+                "qty": 0,
+            }
+
+        result[key]["qty"] += item["qty"]
+
+    return list(result.values())
 
 
 def calculate_internika(shf, vsf, side, system, response_profile, decor_color):
@@ -406,6 +429,7 @@ def calculate_internika(shf, vsf, side, system, response_profile, decor_color):
     if vsf < 420 or vsf > 2400:
         warnings.append("ВСФ вне базового диапазона 420–2400 мм для текущего расчета.")
 
+    # Основной запор
     main_lock = find_first(
         MAIN_LOCKS_VARIABLE,
         lambda r: in_range(vsf, r["vsf_min"], r["vsf_max"]),
@@ -420,16 +444,19 @@ def calculate_internika(shf, vsf, side, system, response_profile, decor_color):
         else:
             if main_lock["angle_qty"] >= 1:
                 add_item(items, "1103178", "Переключатель угловой 1R", 1)
+
             if main_lock["angle_qty"] >= 2:
                 add_item(items, "1103183", "Переключатель угловой 2R", 1)
     else:
         warnings.append("Не найден основной запор по высоте створки.")
 
+    # Шпингалет
     if vsf < 1000:
         add_item(items, "1102392", "Шпингалет поворотно-откидного окна нижний ВСФ < 1000", 1)
     else:
         add_item(items, "1102393", "Шпингалет поворотно-откидного окна нижний ВСФ > 1000", 1)
 
+    # Ножницы на створке
     sash_scissors = find_first(
         SASH_SCISSORS,
         lambda r: in_range(shf, r["shf_min"], r["shf_max"]),
@@ -441,6 +468,7 @@ def calculate_internika(shf, vsf, side, system, response_profile, decor_color):
     else:
         warnings.append("Не найдены ножницы на створке по ширине.")
 
+    # Ножницы на раме
     frame_scissors = find_first(
         FRAME_SCISSORS,
         lambda r: (
@@ -455,6 +483,7 @@ def calculate_internika(shf, vsf, side, system, response_profile, decor_color):
     else:
         warnings.append("Не найдены ножницы на раме по системе, стороне и ширине.")
 
+    # Средний запор
     middle_lock = find_first(
         MIDDLE_LOCKS,
         lambda r: (
@@ -467,11 +496,13 @@ def calculate_internika(shf, vsf, side, system, response_profile, decor_color):
         add_item(items, middle_lock["sku"], middle_lock["name"], 1)
         regular_response_qty += middle_lock["response_qty"]
 
+    # Петли и блокиратор
     add_item(items, "1077266", "Петля на раме верхняя 3 мм со штифтом", 1)
     add_item(items, "1077265", "Петля на раме нижняя 3 мм", 1)
     add_item(items, "1077263", "Петля на створке нижняя 3 мм", 1)
     add_item(items, "1089062", "Блокиратор откидывания", 1)
 
+    # Ответные планки
     profile = RESPONSE_PLATE_PROFILES.get(response_profile)
 
     if profile:
@@ -485,28 +516,28 @@ def calculate_internika(shf, vsf, side, system, response_profile, decor_color):
     else:
         warnings.append("Не найден профиль ответных планок.")
 
+    # Декоративные накладки
     if decor_color in DECOR_KITS:
-        add_item(items, DECOR_KITS[decor_color], f"Комплект декоративных накладок, цвет {decor_color}", 1)
-
-    df = pd.DataFrame(items)
-
-    if not df.empty:
-        df = (
-            df.groupby(["Артикул", "Наименование"], as_index=False)
-            .agg({"Кол-во": "sum"})
-            .sort_values(["Наименование", "Артикул"])
+        add_item(
+            items,
+            DECOR_KITS[decor_color],
+            f"Комплект декоративных накладок, цвет {decor_color}",
+            1,
         )
+
+    aggregated = aggregate_items(items)
 
     text = "Спецификация Internika:\n\n"
 
-    if df.empty:
+    if not aggregated:
         text += "Не удалось сформировать спецификацию.\n"
     else:
-        for _, row in df.iterrows():
-            text += f"{row['Артикул']} — {row['Наименование']} — {row['Кол-во']} шт.\n"
+        for item in aggregated:
+            text += f"{item['sku']} — {item['name']} — {item['qty']} шт.\n"
 
     if warnings:
         text += "\nПредупреждения:\n"
+
         for warning in warnings:
             text += f"• {warning}\n"
 
@@ -541,11 +572,13 @@ def kb(items):
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext):
     await state.clear()
+
     await message.answer(
         "Калькулятор фурнитуры Internika.\n\n"
         "Введите ШСФ — ширину створки по фальцу, мм.\n"
         "Например: 800"
     )
+
     await state.set_state(CalcStates.shf)
 
 
@@ -564,7 +597,12 @@ async def get_shf(message: Message, state: FSMContext):
         return
 
     await state.update_data(shf=shf)
-    await message.answer("Введите ВСФ — высоту створки по фальцу, мм.\nНапример: 1200")
+
+    await message.answer(
+        "Введите ВСФ — высоту створки по фальцу, мм.\n"
+        "Например: 1200"
+    )
+
     await state.set_state(CalcStates.vsf)
 
 
@@ -577,10 +615,12 @@ async def get_vsf(message: Message, state: FSMContext):
         return
 
     await state.update_data(vsf=vsf)
+
     await message.answer(
         "Выберите направление открывания:",
         reply_markup=kb(["Правое", "Левое"]),
     )
+
     await state.set_state(CalcStates.side)
 
 
@@ -591,10 +631,12 @@ async def get_side(message: Message, state: FSMContext):
         return
 
     await state.update_data(side=message.text)
+
     await message.answer(
         "Выберите систему ножниц на раме:",
         reply_markup=kb(["12/20-9", "12/20-13", "12/22-13"]),
     )
+
     await state.set_state(CalcStates.system)
 
 
@@ -605,10 +647,12 @@ async def get_system(message: Message, state: FSMContext):
         return
 
     await state.update_data(system=message.text)
+
     await message.answer(
         "Выберите профиль ответных планок:",
         reply_markup=kb(list(RESPONSE_PLATE_PROFILES.keys())),
     )
+
     await state.set_state(CalcStates.response_profile)
 
 
@@ -619,10 +663,12 @@ async def get_response_profile(message: Message, state: FSMContext):
         return
 
     await state.update_data(response_profile=message.text)
+
     await message.answer(
         "Выберите декоративные накладки:",
         reply_markup=kb(["белый", "темно-коричневый", "без накладок"]),
     )
+
     await state.set_state(CalcStates.decor_color)
 
 
@@ -635,6 +681,7 @@ async def get_decor_color(message: Message, state: FSMContext):
     data = await state.get_data()
 
     decor_color = message.text
+
     if decor_color == "без накладок":
         decor_color = ""
 
@@ -649,12 +696,45 @@ async def get_decor_color(message: Message, state: FSMContext):
 
     await message.answer(result)
     await message.answer("Для нового расчета нажмите /start")
+
     await state.clear()
+
+
+# =========================
+# Healthcheck server for Render
+# =========================
+
+async def healthcheck(request):
+    return web.Response(text="Internika Telegram Bot is running")
+
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", healthcheck)
+    app.router.add_get("/health", healthcheck)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
+    print(f"Web server started on port {PORT}")
+
+
+# =========================
+# Main
+# =========================
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
+
+    await start_web_server()
+
     print("Bot started")
+
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
