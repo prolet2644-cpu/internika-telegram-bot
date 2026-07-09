@@ -1,5 +1,11 @@
 import os
-from collections import defaultdict
+import uuid
+import smtplib
+import logging
+from datetime import datetime
+from email.message import EmailMessage
+from xml.etree.ElementTree import Element, SubElement, tostring
+from xml.dom import minidom
 
 from aiohttp import web
 
@@ -17,15 +23,70 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
+
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "internika_secret_123")
 WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}"
+
+LOG_SECRET = os.getenv("LOG_SECRET", "internika_log_123")
+
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+ORDER_EMAIL_TO = os.getenv("ORDER_EMAIL_TO")
+SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Internika bot")
+
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задана переменная окружения BOT_TOKEN")
 
 if not WEBHOOK_URL:
     raise RuntimeError("Не задана переменная окружения WEBHOOK_URL")
+
+
+# =========================
+# LOGGING
+# =========================
+
+LOG_FILE = "app.log"
+
+logger = logging.getLogger("internika_bot")
+logger.setLevel(logging.INFO)
+
+formatter = logging.Formatter(
+    fmt="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+
+file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+file_handler.setFormatter(formatter)
+
+logger.addHandler(stream_handler)
+logger.addHandler(file_handler)
+
+
+def log_event(stage, message, **kwargs):
+    details = " | ".join([f"{k}={v}" for k, v in kwargs.items()])
+    if details:
+        logger.info(f"{stage} | {message} | {details}")
+    else:
+        logger.info(f"{stage} | {message}")
+
+
+def log_error(stage, message, exc=None, **kwargs):
+    details = " | ".join([f"{k}={v}" for k, v in kwargs.items()])
+    base = f"{stage} | {message}"
+    if details:
+        base += f" | {details}"
+
+    if exc:
+        logger.exception(base)
+    else:
+        logger.error(base)
 
 
 # =========================
@@ -302,6 +363,17 @@ def calculate_internika(shf, vsf, side, system, response_profile, decor_color):
     warnings = []
     regular_response_qty = 0
 
+    log_event(
+        "CALC_START",
+        "Начат расчет",
+        shf=shf,
+        vsf=vsf,
+        side=side,
+        system=system,
+        response_profile=response_profile,
+        decor_color=decor_color,
+    )
+
     if shf < 325 or shf > 1600:
         warnings.append("ШСФ вне базового диапазона 325–1600 мм.")
 
@@ -398,21 +470,222 @@ def calculate_internika(shf, vsf, side, system, response_profile, decor_color):
 
     aggregated = aggregate_items(items)
 
+    log_event(
+        "CALC_OK",
+        "Расчет завершен",
+        items_count=len(aggregated),
+        warnings_count=len(warnings),
+    )
+
+    return aggregated, warnings
+
+
+def format_specification(items, warnings):
     text = "Спецификация Internika:\n\n"
 
-    if not aggregated:
+    if not items:
         text += "Не удалось сформировать спецификацию.\n"
     else:
-        for item in aggregated:
+        for item in items:
             text += f"{item['sku']} — {item['name']} — {item['qty']} шт.\n"
 
     if warnings:
         text += "\nПредупреждения:\n"
-
         for warning in warnings:
             text += f"• {warning}\n"
 
     return text
+
+
+# =========================
+# XML + SMTP
+# =========================
+
+def clean_code(value):
+    return str(value).strip().replace(" ", "").replace("\n", "").replace("\r", "")
+
+
+def build_order_filename(firm_code, warehouse_code):
+    firm_code = clean_code(firm_code)
+    warehouse_code = clean_code(warehouse_code)
+    return f"ORDER_MAIN%firm-{firm_code}{warehouse_code}%(Internika_bot).xml"
+
+
+def build_order_xml(items, firm_code, warehouse_code):
+    log_event(
+        "XML_BUILD_START",
+        "Начато формирование XML",
+        firm_code=firm_code,
+        warehouse_code=warehouse_code,
+        items_count=len(items),
+    )
+
+    if not items:
+        raise RuntimeError("Нет товарных позиций для формирования XML")
+
+    root = Element("КоммерческаяИнформация")
+
+    doc_number = f"IB{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+    doc = SubElement(
+        root,
+        "Документ",
+        {
+            "Дата": datetime.now().strftime("%d.%m.%Y"),
+            "Комментарий": f"Заявка сформирована ботом Internika. ШИФР={firm_code}; Склад={warehouse_code}",
+            "Номер": doc_number,
+            "ХозОперация": "Order",
+        },
+    )
+
+    for item in items:
+        sku = str(item["sku"]).strip()
+        qty = str(int(item["qty"]))
+        name = str(item["name"]).strip()
+
+        SubElement(
+            doc,
+            "ТоварнаяПозиция",
+            {
+                "Единица": "шт",
+                "Количество": qty,
+                "Товар": sku,
+                "Описание": name,
+            },
+        )
+
+    rough_xml = tostring(root, encoding="utf-8")
+    parsed = minidom.parseString(rough_xml)
+    xml_bytes = parsed.toprettyxml(indent="\t", encoding="UTF-8")
+
+    log_event(
+        "XML_BUILD_OK",
+        "XML сформирован",
+        doc_number=doc_number,
+        xml_size_bytes=len(xml_bytes),
+    )
+
+    return xml_bytes, doc_number
+
+
+def save_xml_file(filename, xml_bytes):
+    log_event("XML_SAVE_START", "Начато сохранение XML", filename=filename)
+
+    with open(filename, "wb") as file:
+        file.write(xml_bytes)
+
+    file_size = os.path.getsize(filename)
+
+    log_event(
+        "XML_SAVE_OK",
+        "XML сохранен",
+        filename=filename,
+        file_size_bytes=file_size,
+    )
+
+    return file_size
+
+
+def check_smtp_env():
+    missing = []
+
+    if not SMTP_HOST:
+        missing.append("SMTP_HOST")
+
+    if not SMTP_PORT:
+        missing.append("SMTP_PORT")
+
+    if not SMTP_USER:
+        missing.append("SMTP_USER")
+
+    if not SMTP_PASSWORD:
+        missing.append("SMTP_PASSWORD")
+
+    if not ORDER_EMAIL_TO:
+        missing.append("ORDER_EMAIL_TO")
+
+    if missing:
+        raise RuntimeError(f"Не заданы SMTP-переменные: {', '.join(missing)}")
+
+
+def send_email_with_xml(filename, xml_bytes, firm_code, warehouse_code, doc_number):
+    check_smtp_env()
+
+    log_event(
+        "SMTP_START",
+        "Начата отправка письма",
+        smtp_host=SMTP_HOST,
+        smtp_port=SMTP_PORT,
+        smtp_user=SMTP_USER,
+        order_email_to=ORDER_EMAIL_TO,
+        filename=filename,
+        doc_number=doc_number,
+    )
+
+    msg = EmailMessage()
+    msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_USER}>"
+    msg["To"] = ORDER_EMAIL_TO
+    msg["Subject"] = f"Заявка Internika bot: {filename}"
+
+    msg.set_content(
+        "Во вложении XML-файл заявки, сформированный ботом Internika.\n\n"
+        f"ШИФР фирмы: {firm_code}\n"
+        f"Код склада: {warehouse_code}\n"
+        f"Номер документа: {doc_number}\n"
+        f"Файл: {filename}\n"
+    )
+
+    msg.add_attachment(
+        xml_bytes,
+        maintype="application",
+        subtype="xml",
+        filename=filename,
+    )
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=300) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+
+        log_event(
+            "SMTP_OK",
+            "Письмо успешно отправлено",
+            filename=filename,
+            order_email_to=ORDER_EMAIL_TO,
+            doc_number=doc_number,
+        )
+
+    except smtplib.SMTPAuthenticationError as exc:
+        log_error(
+            "SMTP_AUTH_ERROR",
+            "Ошибка авторизации SMTP. Проверь SMTP_USER и SMTP_PASSWORD / пароль приложения Gmail",
+            exc=exc,
+            smtp_user=SMTP_USER,
+        )
+        raise
+
+    except smtplib.SMTPConnectError as exc:
+        log_error(
+            "SMTP_CONNECT_ERROR",
+            "Ошибка подключения к SMTP-серверу",
+            exc=exc,
+            smtp_host=SMTP_HOST,
+            smtp_port=SMTP_PORT,
+        )
+        raise
+
+    except smtplib.SMTPException as exc:
+        log_error(
+            "SMTP_ERROR",
+            "SMTP-ошибка при отправке письма",
+            exc=exc,
+            smtp_host=SMTP_HOST,
+            smtp_port=SMTP_PORT,
+        )
+        raise
 
 
 # =========================
@@ -426,6 +699,9 @@ class CalcStates(StatesGroup):
     system = State()
     response_profile = State()
     decor_color = State()
+    after_calc = State()
+    firm_code = State()
+    warehouse_code = State()
 
 
 bot = Bot(token=BOT_TOKEN)
@@ -443,6 +719,13 @@ def kb(items):
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext):
     await state.clear()
+
+    log_event(
+        "TG_START",
+        "Пользователь начал расчет",
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+    )
 
     await message.answer(
         "Калькулятор фурнитуры Internika.\n\n"
@@ -552,23 +835,166 @@ async def get_decor_color(message: Message, state: FSMContext):
     data = await state.get_data()
 
     decor_color = message.text
-
     if decor_color == "без накладок":
         decor_color = ""
 
-    result = calculate_internika(
-        shf=data["shf"],
-        vsf=data["vsf"],
-        side=data["side"],
-        system=data["system"],
-        response_profile=data["response_profile"],
-        decor_color=decor_color,
+    try:
+        items, warnings = calculate_internika(
+            shf=data["shf"],
+            vsf=data["vsf"],
+            side=data["side"],
+            system=data["system"],
+            response_profile=data["response_profile"],
+            decor_color=decor_color,
+        )
+
+        result_text = format_specification(items, warnings)
+
+        await state.update_data(
+            decor_color=decor_color,
+            last_items=items,
+            last_warnings=warnings,
+        )
+
+        await message.answer(result_text)
+
+        await message.answer(
+            "Что сделать дальше?",
+            reply_markup=kb(["Отправить заявку", "Новый расчет"]),
+        )
+
+        await state.set_state(CalcStates.after_calc)
+
+    except Exception as exc:
+        log_error(
+            "CALC_ERROR",
+            "Ошибка при расчете",
+            exc=exc,
+            user_id=message.from_user.id,
+        )
+        await message.answer(
+            "Ошибка при расчете. Подробности смотри в Render Logs или /logs."
+        )
+
+
+@dp.message(CalcStates.after_calc)
+async def after_calc_action(message: Message, state: FSMContext):
+    if message.text == "Новый расчет":
+        await state.clear()
+        await message.answer("Для нового расчета нажмите /start")
+        return
+
+    if message.text == "Отправить заявку":
+        data = await state.get_data()
+        items = data.get("last_items", [])
+
+        if not items:
+            await message.answer("Не найден последний расчет. Сначала выполните расчет заново через /start")
+            await state.clear()
+            return
+
+        await message.answer(
+            "Введите ШИФР фирмы.\n"
+            "Например: 1000000"
+        )
+
+        await state.set_state(CalcStates.firm_code)
+        return
+
+    await message.answer("Выберите действие кнопкой.")
+
+
+@dp.message(CalcStates.firm_code)
+async def get_firm_code(message: Message, state: FSMContext):
+    firm_code = clean_code(message.text)
+
+    if not firm_code:
+        await message.answer("ШИФР фирмы не должен быть пустым.")
+        return
+
+    await state.update_data(firm_code=firm_code)
+
+    await message.answer(
+        "Введите код склада.\n"
+        "Например: 4290"
     )
 
-    await message.answer(result)
-    await message.answer("Для нового расчета нажмите /start")
+    await state.set_state(CalcStates.warehouse_code)
 
-    await state.clear()
+
+@dp.message(CalcStates.warehouse_code)
+async def get_warehouse_code(message: Message, state: FSMContext):
+    warehouse_code = clean_code(message.text)
+
+    if not warehouse_code:
+        await message.answer("Код склада не должен быть пустым.")
+        return
+
+    data = await state.get_data()
+
+    firm_code = data.get("firm_code")
+    items = data.get("last_items", [])
+
+    operation_id = str(uuid.uuid4())[:8]
+
+    log_event(
+        "ORDER_START",
+        "Начато создание заявки",
+        operation_id=operation_id,
+        user_id=message.from_user.id,
+        firm_code=firm_code,
+        warehouse_code=warehouse_code,
+        items_count=len(items),
+    )
+
+    await message.answer("Формирую XML и отправляю заявку на почту...")
+
+    try:
+        filename = build_order_filename(firm_code, warehouse_code)
+        xml_bytes, doc_number = build_order_xml(items, firm_code, warehouse_code)
+
+        save_xml_file(filename, xml_bytes)
+
+        send_email_with_xml(
+            filename=filename,
+            xml_bytes=xml_bytes,
+            firm_code=firm_code,
+            warehouse_code=warehouse_code,
+            doc_number=doc_number,
+        )
+
+        log_event(
+            "ORDER_OK",
+            "Заявка успешно сформирована и отправлена",
+            operation_id=operation_id,
+            filename=filename,
+            doc_number=doc_number,
+        )
+
+        await message.answer(
+            "Заявка успешно сформирована и отправлена.\n\n"
+            f"Файл: {filename}\n"
+            f"Номер документа: {doc_number}"
+        )
+
+        await message.answer("Для нового расчета нажмите /start")
+        await state.clear()
+
+    except Exception as exc:
+        log_error(
+            "ORDER_ERROR",
+            "Ошибка при создании или отправке заявки",
+            exc=exc,
+            operation_id=operation_id,
+            firm_code=firm_code,
+            warehouse_code=warehouse_code,
+        )
+
+        await message.answer(
+            "Ошибка при формировании или отправке заявки.\n\n"
+            f"ID операции: {operation_id}\n"
+            "Проверь Render Logs или страницу /logs."
+        )
 
 
 # =========================
@@ -579,13 +1005,39 @@ async def healthcheck(request):
     return web.Response(text="Internika Telegram Bot is running")
 
 
+async def logs_view(request):
+    key = request.query.get("key")
+
+    if key != LOG_SECRET:
+        return web.Response(status=403, text="Forbidden")
+
+    try:
+        if not os.path.exists(LOG_FILE):
+            return web.Response(text="Лог-файл пока не создан.")
+
+        with open(LOG_FILE, "r", encoding="utf-8") as file:
+            lines = file.readlines()
+
+        last_lines = lines[-300:]
+
+        return web.Response(
+            text="".join(last_lines),
+            content_type="text/plain",
+            charset="utf-8",
+        )
+
+    except Exception as exc:
+        return web.Response(status=500, text=f"Ошибка чтения логов: {exc}")
+
+
 async def telegram_webhook(request):
     try:
         data = await request.json()
         update = Update.model_validate(data, context={"bot": bot})
         await dp.feed_update(bot, update)
+
     except Exception as exc:
-        print(f"Webhook error: {exc}")
+        log_error("WEBHOOK_ERROR", "Ошибка обработки webhook", exc=exc)
 
     return web.Response(text="OK")
 
@@ -599,12 +1051,12 @@ async def on_startup(app):
         drop_pending_updates=True,
     )
 
-    print(f"Webhook set to: {webhook_full_url}")
+    log_event("WEBHOOK_SET", "Webhook установлен", webhook_url=webhook_full_url)
 
 
 async def on_shutdown(app):
     await bot.session.close()
-    print("Bot session closed")
+    log_event("BOT_SHUTDOWN", "Сессия бота закрыта")
 
 
 def create_app():
@@ -612,6 +1064,7 @@ def create_app():
 
     app.router.add_get("/", healthcheck)
     app.router.add_get("/health", healthcheck)
+    app.router.add_get("/logs", logs_view)
     app.router.add_post(WEBHOOK_PATH, telegram_webhook)
 
     app.on_startup.append(on_startup)
@@ -621,6 +1074,7 @@ def create_app():
 
 
 if __name__ == "__main__":
+    log_event("APP_START", "Запуск приложения", port=PORT)
     web.run_app(
         create_app(),
         host="0.0.0.0",
