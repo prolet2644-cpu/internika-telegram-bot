@@ -1,5 +1,6 @@
 import os
 import uuid
+import asyncio
 import smtplib
 import logging
 from datetime import datetime
@@ -10,7 +11,13 @@ from xml.dom import minidom
 from aiohttp import web
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, Update
+from aiogram.types import (
+    Message,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
+    Update,
+)
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -65,12 +72,18 @@ stream_handler.setFormatter(formatter)
 file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
 file_handler.setFormatter(formatter)
 
-logger.addHandler(stream_handler)
-logger.addHandler(file_handler)
+if not logger.handlers:
+    logger.addHandler(stream_handler)
+    logger.addHandler(file_handler)
+else:
+    logger.handlers.clear()
+    logger.addHandler(stream_handler)
+    logger.addHandler(file_handler)
 
 
 def log_event(stage, message, **kwargs):
     details = " | ".join([f"{k}={v}" for k, v in kwargs.items()])
+
     if details:
         logger.info(f"{stage} | {message} | {details}")
     else:
@@ -80,6 +93,7 @@ def log_event(stage, message, **kwargs):
 def log_error(stage, message, exc=None, **kwargs):
     details = " | ".join([f"{k}={v}" for k, v in kwargs.items()])
     base = f"{stage} | {message}"
+
     if details:
         base += f" | {details}"
 
@@ -87,6 +101,21 @@ def log_error(stage, message, exc=None, **kwargs):
         logger.exception(base)
     else:
         logger.error(base)
+
+
+def user_info(message: Message):
+    user = message.from_user
+
+    if not user:
+        return {
+            "user_id": "unknown",
+            "username": "unknown",
+        }
+
+    return {
+        "user_id": user.id,
+        "username": user.username,
+    }
 
 
 # =========================
@@ -193,26 +222,150 @@ SASH_SCISSORS = [
 
 
 FRAME_SCISSORS = [
-    {"system": "12/20-9", "shf_min": 325, "shf_max": 610, "side": "Левое", "sku": "1088661", "name": "Ножницы на раме 12/20-9 250 левое"},
-    {"system": "12/20-9", "shf_min": 325, "shf_max": 610, "side": "Правое", "sku": "1088662", "name": "Ножницы на раме 12/20-9 250 правое"},
-    {"system": "12/20-9", "shf_min": 611, "shf_max": 810, "side": "Левое", "sku": "1088663", "name": "Ножницы на раме 12/20-9 350 левое"},
-    {"system": "12/20-9", "shf_min": 611, "shf_max": 810, "side": "Правое", "sku": "1088664", "name": "Ножницы на раме 12/20-9 350 правое"},
-    {"system": "12/20-9", "shf_min": 811, "shf_max": 1600, "side": "Левое", "sku": "1088665", "name": "Ножницы на раме 12/20-9 500 левое"},
-    {"system": "12/20-9", "shf_min": 811, "shf_max": 1600, "side": "Правое", "sku": "1088666", "name": "Ножницы на раме 12/20-9 500 правое"},
-
-    {"system": "12/20-13", "shf_min": 325, "shf_max": 610, "side": "Левое", "sku": "1088667", "name": "Ножницы на раме 12/20-13 250 левое"},
-    {"system": "12/20-13", "shf_min": 325, "shf_max": 610, "side": "Правое", "sku": "1088668", "name": "Ножницы на раме 12/20-13 250 правое"},
-    {"system": "12/20-13", "shf_min": 611, "shf_max": 810, "side": "Левое", "sku": "1088669", "name": "Ножницы на раме 12/20-13 350 левое"},
-    {"system": "12/20-13", "shf_min": 611, "shf_max": 810, "side": "Правое", "sku": "1088670", "name": "Ножницы на раме 12/20-13 350 правое"},
-    {"system": "12/20-13", "shf_min": 811, "shf_max": 1600, "side": "Левое", "sku": "1088671", "name": "Ножницы на раме 12/20-13 500 левое"},
-    {"system": "12/20-13", "shf_min": 811, "shf_max": 1600, "side": "Правое", "sku": "1088672", "name": "Ножницы на раме 12/20-13 500 правое"},
-
-    {"system": "12/22-13", "shf_min": 325, "shf_max": 610, "side": "Левое", "sku": "1088673", "name": "Ножницы на раме 12/22-13 250 левое"},
-    {"system": "12/22-13", "shf_min": 325, "shf_max": 610, "side": "Правое", "sku": "1088674", "name": "Ножницы на раме 12/22-13 250 правое"},
-    {"system": "12/22-13", "shf_min": 611, "shf_max": 810, "side": "Левое", "sku": "1088675", "name": "Ножницы на раме 12/22-13 350 левое"},
-    {"system": "12/22-13", "shf_min": 611, "shf_max": 810, "side": "Правое", "sku": "1088676", "name": "Ножницы на раме 12/22-13 350 правое"},
-    {"system": "12/22-13", "shf_min": 811, "shf_max": 1600, "side": "Левое", "sku": "1088677", "name": "Ножницы на раме 12/22-13 500 левое"},
-    {"system": "12/22-13", "shf_min": 811, "shf_max": 1600, "side": "Правое", "sku": "1088678", "name": "Ножницы на раме 12/22-13 500 правое"},
+    {
+        "system": "12/20-9",
+        "shf_min": 325,
+        "shf_max": 610,
+        "side": "Левое",
+        "sku": "1088661",
+        "name": "Ножницы на раме 12/20-9 250 левое",
+    },
+    {
+        "system": "12/20-9",
+        "shf_min": 325,
+        "shf_max": 610,
+        "side": "Правое",
+        "sku": "1088662",
+        "name": "Ножницы на раме 12/20-9 250 правое",
+    },
+    {
+        "system": "12/20-9",
+        "shf_min": 611,
+        "shf_max": 810,
+        "side": "Левое",
+        "sku": "1088663",
+        "name": "Ножницы на раме 12/20-9 350 левое",
+    },
+    {
+        "system": "12/20-9",
+        "shf_min": 611,
+        "shf_max": 810,
+        "side": "Правое",
+        "sku": "1088664",
+        "name": "Ножницы на раме 12/20-9 350 правое",
+    },
+    {
+        "system": "12/20-9",
+        "shf_min": 811,
+        "shf_max": 1600,
+        "side": "Левое",
+        "sku": "1088665",
+        "name": "Ножницы на раме 12/20-9 500 левое",
+    },
+    {
+        "system": "12/20-9",
+        "shf_min": 811,
+        "shf_max": 1600,
+        "side": "Правое",
+        "sku": "1088666",
+        "name": "Ножницы на раме 12/20-9 500 правое",
+    },
+    {
+        "system": "12/20-13",
+        "shf_min": 325,
+        "shf_max": 610,
+        "side": "Левое",
+        "sku": "1088667",
+        "name": "Ножницы на раме 12/20-13 250 левое",
+    },
+    {
+        "system": "12/20-13",
+        "shf_min": 325,
+        "shf_max": 610,
+        "side": "Правое",
+        "sku": "1088668",
+        "name": "Ножницы на раме 12/20-13 250 правое",
+    },
+    {
+        "system": "12/20-13",
+        "shf_min": 611,
+        "shf_max": 810,
+        "side": "Левое",
+        "sku": "1088669",
+        "name": "Ножницы на раме 12/20-13 350 левое",
+    },
+    {
+        "system": "12/20-13",
+        "shf_min": 611,
+        "shf_max": 810,
+        "side": "Правое",
+        "sku": "1088670",
+        "name": "Ножницы на раме 12/20-13 350 правое",
+    },
+    {
+        "system": "12/20-13",
+        "shf_min": 811,
+        "shf_max": 1600,
+        "side": "Левое",
+        "sku": "1088671",
+        "name": "Ножницы на раме 12/20-13 500 левое",
+    },
+    {
+        "system": "12/20-13",
+        "shf_min": 811,
+        "shf_max": 1600,
+        "side": "Правое",
+        "sku": "1088672",
+        "name": "Ножницы на раме 12/20-13 500 правое",
+    },
+    {
+        "system": "12/22-13",
+        "shf_min": 325,
+        "shf_max": 610,
+        "side": "Левое",
+        "sku": "1088673",
+        "name": "Ножницы на раме 12/22-13 250 левое",
+    },
+    {
+        "system": "12/22-13",
+        "shf_min": 325,
+        "shf_max": 610,
+        "side": "Правое",
+        "sku": "1088674",
+        "name": "Ножницы на раме 12/22-13 250 правое",
+    },
+    {
+        "system": "12/22-13",
+        "shf_min": 611,
+        "shf_max": 810,
+        "side": "Левое",
+        "sku": "1088675",
+        "name": "Ножницы на раме 12/22-13 350 левое",
+    },
+    {
+        "system": "12/22-13",
+        "shf_min": 611,
+        "shf_max": 810,
+        "side": "Правое",
+        "sku": "1088676",
+        "name": "Ножницы на раме 12/22-13 350 правое",
+    },
+    {
+        "system": "12/22-13",
+        "shf_min": 811,
+        "shf_max": 1600,
+        "side": "Левое",
+        "sku": "1088677",
+        "name": "Ножницы на раме 12/22-13 500 левое",
+    },
+    {
+        "system": "12/22-13",
+        "shf_min": 811,
+        "shf_max": 1600,
+        "side": "Правое",
+        "sku": "1088678",
+        "name": "Ножницы на раме 12/22-13 500 правое",
+    },
 ]
 
 
@@ -312,8 +465,10 @@ DECOR_KITS = {
 def in_range(value, min_v, max_v):
     if min_v is not None and value < min_v:
         return False
+
     if max_v is not None and value > max_v:
         return False
+
     return True
 
 
@@ -321,6 +476,7 @@ def find_first(rows, predicate):
     for row in rows:
         if predicate(row):
             return row
+
     return None
 
 
@@ -491,6 +647,7 @@ def format_specification(items, warnings):
 
     if warnings:
         text += "\nПредупреждения:\n"
+
         for warning in warnings:
             text += f"• {warning}\n"
 
@@ -502,12 +659,20 @@ def format_specification(items, warnings):
 # =========================
 
 def clean_code(value):
-    return str(value).strip().replace(" ", "").replace("\n", "").replace("\r", "")
+    return (
+        str(value)
+        .strip()
+        .replace(" ", "")
+        .replace("\n", "")
+        .replace("\r", "")
+        .replace("\t", "")
+    )
 
 
 def build_order_filename(firm_code, warehouse_code):
     firm_code = clean_code(firm_code)
     warehouse_code = clean_code(warehouse_code)
+
     return f"ORDER_MAIN%firm-{firm_code}{warehouse_code}%(Internika_bot).xml"
 
 
@@ -608,7 +773,7 @@ def check_smtp_env():
         raise RuntimeError(f"Не заданы SMTP-переменные: {', '.join(missing)}")
 
 
-def send_email_with_xml(filename, xml_bytes, firm_code, warehouse_code, doc_number):
+def send_email_with_xml_sync(filename, xml_bytes, firm_code, warehouse_code, doc_number):
     check_smtp_env()
 
     log_event(
@@ -643,12 +808,30 @@ def send_email_with_xml(filename, xml_bytes, firm_code, warehouse_code, doc_numb
     )
 
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=300) as server:
+        log_event("SMTP_CONNECT_START", "Подключение к SMTP-серверу")
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+            log_event("SMTP_CONNECT_OK", "Подключение к SMTP-серверу успешно")
+
+            log_event("SMTP_EHLO_START", "EHLO до STARTTLS")
             server.ehlo()
+            log_event("SMTP_EHLO_OK", "EHLO до STARTTLS успешно")
+
+            log_event("SMTP_STARTTLS_START", "Запуск STARTTLS")
             server.starttls()
+            log_event("SMTP_STARTTLS_OK", "STARTTLS успешно")
+
+            log_event("SMTP_EHLO2_START", "EHLO после STARTTLS")
             server.ehlo()
+            log_event("SMTP_EHLO2_OK", "EHLO после STARTTLS успешно")
+
+            log_event("SMTP_LOGIN_START", "Авторизация SMTP")
             server.login(SMTP_USER, SMTP_PASSWORD)
+            log_event("SMTP_LOGIN_OK", "Авторизация SMTP успешна")
+
+            log_event("SMTP_SEND_START", "Отправка письма")
             server.send_message(msg)
+            log_event("SMTP_SEND_OK", "Письмо передано SMTP-серверу")
 
         log_event(
             "SMTP_OK",
@@ -677,6 +860,16 @@ def send_email_with_xml(filename, xml_bytes, firm_code, warehouse_code, doc_numb
         )
         raise
 
+    except smtplib.SMTPServerDisconnected as exc:
+        log_error(
+            "SMTP_DISCONNECTED",
+            "SMTP-сервер разорвал соединение",
+            exc=exc,
+            smtp_host=SMTP_HOST,
+            smtp_port=SMTP_PORT,
+        )
+        raise
+
     except smtplib.SMTPException as exc:
         log_error(
             "SMTP_ERROR",
@@ -686,6 +879,93 @@ def send_email_with_xml(filename, xml_bytes, firm_code, warehouse_code, doc_numb
             smtp_port=SMTP_PORT,
         )
         raise
+
+    except TimeoutError as exc:
+        log_error(
+            "SMTP_TIMEOUT",
+            "Таймаут SMTP-операции",
+            exc=exc,
+            smtp_host=SMTP_HOST,
+            smtp_port=SMTP_PORT,
+        )
+        raise
+
+    except OSError as exc:
+        log_error(
+            "SMTP_OS_ERROR",
+            "Сетевая ошибка при SMTP-отправке",
+            exc=exc,
+            smtp_host=SMTP_HOST,
+            smtp_port=SMTP_PORT,
+        )
+        raise
+
+
+async def process_order_background(
+    chat_id,
+    user_id,
+    firm_code,
+    warehouse_code,
+    items,
+    operation_id,
+):
+    try:
+        log_event(
+            "ORDER_BACKGROUND_START",
+            "Фоновая обработка заявки начата",
+            operation_id=operation_id,
+            user_id=user_id,
+            firm_code=firm_code,
+            warehouse_code=warehouse_code,
+            items_count=len(items),
+        )
+
+        filename = build_order_filename(firm_code, warehouse_code)
+        xml_bytes, doc_number = build_order_xml(items, firm_code, warehouse_code)
+
+        save_xml_file(filename, xml_bytes)
+
+        await asyncio.to_thread(
+            send_email_with_xml_sync,
+            filename,
+            xml_bytes,
+            firm_code,
+            warehouse_code,
+            doc_number,
+        )
+
+        log_event(
+            "ORDER_OK",
+            "Заявка успешно сформирована и отправлена",
+            operation_id=operation_id,
+            filename=filename,
+            doc_number=doc_number,
+        )
+
+        await bot.send_message(
+            chat_id,
+            "Заявка успешно сформирована и отправлена.\n\n"
+            f"Файл: {filename}\n"
+            f"Номер документа: {doc_number}\n\n"
+            "Для нового расчета нажмите /start",
+        )
+
+    except Exception as exc:
+        log_error(
+            "ORDER_ERROR",
+            "Ошибка при создании или отправке заявки",
+            exc=exc,
+            operation_id=operation_id,
+            firm_code=firm_code,
+            warehouse_code=warehouse_code,
+        )
+
+        await bot.send_message(
+            chat_id,
+            "Ошибка при формировании или отправке заявки.\n\n"
+            f"ID операции: {operation_id}\n"
+            "Проверь Render Logs или страницу /logs.",
+        )
 
 
 # =========================
@@ -720,17 +1000,20 @@ def kb(items):
 async def start(message: Message, state: FSMContext):
     await state.clear()
 
+    info = user_info(message)
+
     log_event(
         "TG_START",
         "Пользователь начал расчет",
-        user_id=message.from_user.id,
-        username=message.from_user.username,
+        user_id=info["user_id"],
+        username=info["username"],
     )
 
     await message.answer(
         "Калькулятор фурнитуры Internika.\n\n"
         "Введите ШСФ — ширину створки по фальцу, мм.\n"
-        "Например: 800"
+        "Например: 800",
+        reply_markup=ReplyKeyboardRemove(),
     )
 
     await state.set_state(CalcStates.shf)
@@ -739,14 +1022,18 @@ async def start(message: Message, state: FSMContext):
 @dp.message(Command("cancel"))
 async def cancel(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Расчет отменен. Для нового расчета нажмите /start")
+
+    await message.answer(
+        "Расчет отменен. Для нового расчета нажмите /start",
+        reply_markup=ReplyKeyboardRemove(),
+    )
 
 
 @dp.message(CalcStates.shf)
 async def get_shf(message: Message, state: FSMContext):
     try:
         shf = int(message.text.strip())
-    except ValueError:
+    except Exception:
         await message.answer("Введите число, например 800")
         return
 
@@ -764,7 +1051,7 @@ async def get_shf(message: Message, state: FSMContext):
 async def get_vsf(message: Message, state: FSMContext):
     try:
         vsf = int(message.text.strip())
-    except ValueError:
+    except Exception:
         await message.answer("Введите число, например 1200")
         return
 
@@ -835,6 +1122,7 @@ async def get_decor_color(message: Message, state: FSMContext):
     data = await state.get_data()
 
     decor_color = message.text
+
     if decor_color == "без накладок":
         decor_color = ""
 
@@ -856,7 +1144,7 @@ async def get_decor_color(message: Message, state: FSMContext):
             last_warnings=warnings,
         )
 
-        await message.answer(result_text)
+        await message.answer(result_text, reply_markup=ReplyKeyboardRemove())
 
         await message.answer(
             "Что сделать дальше?",
@@ -866,14 +1154,18 @@ async def get_decor_color(message: Message, state: FSMContext):
         await state.set_state(CalcStates.after_calc)
 
     except Exception as exc:
+        info = user_info(message)
+
         log_error(
             "CALC_ERROR",
             "Ошибка при расчете",
             exc=exc,
-            user_id=message.from_user.id,
+            user_id=info["user_id"],
         )
+
         await message.answer(
-            "Ошибка при расчете. Подробности смотри в Render Logs или /logs."
+            "Ошибка при расчете. Подробности смотри в Render Logs или /logs.",
+            reply_markup=ReplyKeyboardRemove(),
         )
 
 
@@ -881,7 +1173,12 @@ async def get_decor_color(message: Message, state: FSMContext):
 async def after_calc_action(message: Message, state: FSMContext):
     if message.text == "Новый расчет":
         await state.clear()
-        await message.answer("Для нового расчета нажмите /start")
+
+        await message.answer(
+            "Для нового расчета нажмите /start",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+
         return
 
     if message.text == "Отправить заявку":
@@ -889,13 +1186,18 @@ async def after_calc_action(message: Message, state: FSMContext):
         items = data.get("last_items", [])
 
         if not items:
-            await message.answer("Не найден последний расчет. Сначала выполните расчет заново через /start")
+            await message.answer(
+                "Не найден последний расчет. Сначала выполните расчет заново через /start",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+
             await state.clear()
             return
 
         await message.answer(
             "Введите ШИФР фирмы.\n"
-            "Например: 1000000"
+            "Например: 160329",
+            reply_markup=ReplyKeyboardRemove(),
         )
 
         await state.set_state(CalcStates.firm_code)
@@ -935,66 +1237,39 @@ async def get_warehouse_code(message: Message, state: FSMContext):
     firm_code = data.get("firm_code")
     items = data.get("last_items", [])
 
+    info = user_info(message)
+
     operation_id = str(uuid.uuid4())[:8]
 
     log_event(
         "ORDER_START",
         "Начато создание заявки",
         operation_id=operation_id,
-        user_id=message.from_user.id,
+        user_id=info["user_id"],
         firm_code=firm_code,
         warehouse_code=warehouse_code,
         items_count=len(items),
     )
 
-    await message.answer("Формирую XML и отправляю заявку на почту...")
+    await message.answer(
+        "Заявка принята в обработку.\n"
+        "Формирую XML и отправляю на почту.\n\n"
+        f"ID операции: {operation_id}",
+        reply_markup=ReplyKeyboardRemove(),
+    )
 
-    try:
-        filename = build_order_filename(firm_code, warehouse_code)
-        xml_bytes, doc_number = build_order_xml(items, firm_code, warehouse_code)
-
-        save_xml_file(filename, xml_bytes)
-
-        send_email_with_xml(
-            filename=filename,
-            xml_bytes=xml_bytes,
+    asyncio.create_task(
+        process_order_background(
+            chat_id=message.chat.id,
+            user_id=info["user_id"],
             firm_code=firm_code,
             warehouse_code=warehouse_code,
-            doc_number=doc_number,
-        )
-
-        log_event(
-            "ORDER_OK",
-            "Заявка успешно сформирована и отправлена",
+            items=items,
             operation_id=operation_id,
-            filename=filename,
-            doc_number=doc_number,
         )
+    )
 
-        await message.answer(
-            "Заявка успешно сформирована и отправлена.\n\n"
-            f"Файл: {filename}\n"
-            f"Номер документа: {doc_number}"
-        )
-
-        await message.answer("Для нового расчета нажмите /start")
-        await state.clear()
-
-    except Exception as exc:
-        log_error(
-            "ORDER_ERROR",
-            "Ошибка при создании или отправке заявки",
-            exc=exc,
-            operation_id=operation_id,
-            firm_code=firm_code,
-            warehouse_code=warehouse_code,
-        )
-
-        await message.answer(
-            "Ошибка при формировании или отправке заявки.\n\n"
-            f"ID операции: {operation_id}\n"
-            "Проверь Render Logs или страницу /logs."
-        )
+    await state.clear()
 
 
 # =========================
@@ -1018,7 +1293,7 @@ async def logs_view(request):
         with open(LOG_FILE, "r", encoding="utf-8") as file:
             lines = file.readlines()
 
-        last_lines = lines[-300:]
+        last_lines = lines[-500:]
 
         return web.Response(
             text="".join(last_lines),
@@ -1046,6 +1321,7 @@ async def on_startup(app):
     webhook_full_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
 
     await bot.delete_webhook(drop_pending_updates=True)
+
     await bot.set_webhook(
         url=webhook_full_url,
         drop_pending_updates=True,
@@ -1075,6 +1351,7 @@ def create_app():
 
 if __name__ == "__main__":
     log_event("APP_START", "Запуск приложения", port=PORT)
+
     web.run_app(
         create_app(),
         host="0.0.0.0",
