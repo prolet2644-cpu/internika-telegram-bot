@@ -1,11 +1,10 @@
 import os
-import asyncio
 from collections import defaultdict
 
 from aiohttp import web
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, Update
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -18,9 +17,15 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "internika_secret_123")
+WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}"
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задана переменная окружения BOT_TOKEN")
+
+if not WEBHOOK_URL:
+    raise RuntimeError("Не задана переменная окружения WEBHOOK_URL")
 
 
 # =========================
@@ -127,152 +132,26 @@ SASH_SCISSORS = [
 
 
 FRAME_SCISSORS = [
-    {
-        "system": "12/20-9",
-        "shf_min": 325,
-        "shf_max": 610,
-        "side": "Левое",
-        "sku": "1088661",
-        "name": "Ножницы на раме 12/20-9 250 левое",
-    },
-    {
-        "system": "12/20-9",
-        "shf_min": 325,
-        "shf_max": 610,
-        "side": "Правое",
-        "sku": "1088662",
-        "name": "Ножницы на раме 12/20-9 250 правое",
-    },
-    {
-        "system": "12/20-9",
-        "shf_min": 611,
-        "shf_max": 810,
-        "side": "Левое",
-        "sku": "1088663",
-        "name": "Ножницы на раме 12/20-9 350 левое",
-    },
-    {
-        "system": "12/20-9",
-        "shf_min": 611,
-        "shf_max": 810,
-        "side": "Правое",
-        "sku": "1088664",
-        "name": "Ножницы на раме 12/20-9 350 правое",
-    },
-    {
-        "system": "12/20-9",
-        "shf_min": 811,
-        "shf_max": 1600,
-        "side": "Левое",
-        "sku": "1088665",
-        "name": "Ножницы на раме 12/20-9 500 левое",
-    },
-    {
-        "system": "12/20-9",
-        "shf_min": 811,
-        "shf_max": 1600,
-        "side": "Правое",
-        "sku": "1088666",
-        "name": "Ножницы на раме 12/20-9 500 правое",
-    },
+    {"system": "12/20-9", "shf_min": 325, "shf_max": 610, "side": "Левое", "sku": "1088661", "name": "Ножницы на раме 12/20-9 250 левое"},
+    {"system": "12/20-9", "shf_min": 325, "shf_max": 610, "side": "Правое", "sku": "1088662", "name": "Ножницы на раме 12/20-9 250 правое"},
+    {"system": "12/20-9", "shf_min": 611, "shf_max": 810, "side": "Левое", "sku": "1088663", "name": "Ножницы на раме 12/20-9 350 левое"},
+    {"system": "12/20-9", "shf_min": 611, "shf_max": 810, "side": "Правое", "sku": "1088664", "name": "Ножницы на раме 12/20-9 350 правое"},
+    {"system": "12/20-9", "shf_min": 811, "shf_max": 1600, "side": "Левое", "sku": "1088665", "name": "Ножницы на раме 12/20-9 500 левое"},
+    {"system": "12/20-9", "shf_min": 811, "shf_max": 1600, "side": "Правое", "sku": "1088666", "name": "Ножницы на раме 12/20-9 500 правое"},
 
-    {
-        "system": "12/20-13",
-        "shf_min": 325,
-        "shf_max": 610,
-        "side": "Левое",
-        "sku": "1088667",
-        "name": "Ножницы на раме 12/20-13 250 левое",
-    },
-    {
-        "system": "12/20-13",
-        "shf_min": 325,
-        "shf_max": 610,
-        "side": "Правое",
-        "sku": "1088668",
-        "name": "Ножницы на раме 12/20-13 250 правое",
-    },
-    {
-        "system": "12/20-13",
-        "shf_min": 611,
-        "shf_max": 810,
-        "side": "Левое",
-        "sku": "1088669",
-        "name": "Ножницы на раме 12/20-13 350 левое",
-    },
-    {
-        "system": "12/20-13",
-        "shf_min": 611,
-        "shf_max": 810,
-        "side": "Правое",
-        "sku": "1088670",
-        "name": "Ножницы на раме 12/20-13 350 правое",
-    },
-    {
-        "system": "12/20-13",
-        "shf_min": 811,
-        "shf_max": 1600,
-        "side": "Левое",
-        "sku": "1088671",
-        "name": "Ножницы на раме 12/20-13 500 левое",
-    },
-    {
-        "system": "12/20-13",
-        "shf_min": 811,
-        "shf_max": 1600,
-        "side": "Правое",
-        "sku": "1088672",
-        "name": "Ножницы на раме 12/20-13 500 правое",
-    },
+    {"system": "12/20-13", "shf_min": 325, "shf_max": 610, "side": "Левое", "sku": "1088667", "name": "Ножницы на раме 12/20-13 250 левое"},
+    {"system": "12/20-13", "shf_min": 325, "shf_max": 610, "side": "Правое", "sku": "1088668", "name": "Ножницы на раме 12/20-13 250 правое"},
+    {"system": "12/20-13", "shf_min": 611, "shf_max": 810, "side": "Левое", "sku": "1088669", "name": "Ножницы на раме 12/20-13 350 левое"},
+    {"system": "12/20-13", "shf_min": 611, "shf_max": 810, "side": "Правое", "sku": "1088670", "name": "Ножницы на раме 12/20-13 350 правое"},
+    {"system": "12/20-13", "shf_min": 811, "shf_max": 1600, "side": "Левое", "sku": "1088671", "name": "Ножницы на раме 12/20-13 500 левое"},
+    {"system": "12/20-13", "shf_min": 811, "shf_max": 1600, "side": "Правое", "sku": "1088672", "name": "Ножницы на раме 12/20-13 500 правое"},
 
-    {
-        "system": "12/22-13",
-        "shf_min": 325,
-        "shf_max": 610,
-        "side": "Левое",
-        "sku": "1088673",
-        "name": "Ножницы на раме 12/22-13 250 левое",
-    },
-    {
-        "system": "12/22-13",
-        "shf_min": 325,
-        "shf_max": 610,
-        "side": "Правое",
-        "sku": "1088674",
-        "name": "Ножницы на раме 12/22-13 250 правое",
-    },
-    {
-        "system": "12/22-13",
-        "shf_min": 611,
-        "shf_max": 810,
-        "side": "Левое",
-        "sku": "1088675",
-        "name": "Ножницы на раме 12/22-13 350 левое",
-    },
-    {
-        "system": "12/22-13",
-        "shf_min": 611,
-        "shf_max": 810,
-        "side": "Правое",
-        "sku": "1088676",
-        "name": "Ножницы на раме 12/22-13 350 правое",
-    },
-    {
-        "system": "12/22-13",
-        "shf_min": 811,
-        "shf_max": 1600,
-        "side": "Левое",
-        "sku": "1088677",
-        "name": "Ножницы на раме 12/22-13 500 левое",
-    },
-    {
-        "system": "12/22-13",
-        "shf_min": 811,
-        "shf_max": 1600,
-        "side": "Правое",
-        "sku": "1088678",
-        "name": "Ножницы на раме 12/22-13 500 правое",
-    },
+    {"system": "12/22-13", "shf_min": 325, "shf_max": 610, "side": "Левое", "sku": "1088673", "name": "Ножницы на раме 12/22-13 250 левое"},
+    {"system": "12/22-13", "shf_min": 325, "shf_max": 610, "side": "Правое", "sku": "1088674", "name": "Ножницы на раме 12/22-13 250 правое"},
+    {"system": "12/22-13", "shf_min": 611, "shf_max": 810, "side": "Левое", "sku": "1088675", "name": "Ножницы на раме 12/22-13 350 левое"},
+    {"system": "12/22-13", "shf_min": 611, "shf_max": 810, "side": "Правое", "sku": "1088676", "name": "Ножницы на раме 12/22-13 350 правое"},
+    {"system": "12/22-13", "shf_min": 811, "shf_max": 1600, "side": "Левое", "sku": "1088677", "name": "Ножницы на раме 12/22-13 500 левое"},
+    {"system": "12/22-13", "shf_min": 811, "shf_max": 1600, "side": "Правое", "sku": "1088678", "name": "Ножницы на раме 12/22-13 500 правое"},
 ]
 
 
@@ -331,7 +210,7 @@ RESPONSE_PLATE_PROFILES = {
         "regular": "1077244",
         "blocker_stop": None,
     },
-    "12/20 13, +3.3 мм": {
+    "12/20 13, +3,3 мм": {
         "tilt_turn": "1087832",
         "regular": "1087833",
         "blocker_stop": None,
@@ -429,7 +308,6 @@ def calculate_internika(shf, vsf, side, system, response_profile, decor_color):
     if vsf < 420 or vsf > 2400:
         warnings.append("ВСФ вне базового диапазона 420–2400 мм для текущего расчета.")
 
-    # Основной запор
     main_lock = find_first(
         MAIN_LOCKS_VARIABLE,
         lambda r: in_range(vsf, r["vsf_min"], r["vsf_max"]),
@@ -450,13 +328,11 @@ def calculate_internika(shf, vsf, side, system, response_profile, decor_color):
     else:
         warnings.append("Не найден основной запор по высоте створки.")
 
-    # Шпингалет
     if vsf < 1000:
         add_item(items, "1102392", "Шпингалет поворотно-откидного окна нижний ВСФ < 1000", 1)
     else:
         add_item(items, "1102393", "Шпингалет поворотно-откидного окна нижний ВСФ > 1000", 1)
 
-    # Ножницы на створке
     sash_scissors = find_first(
         SASH_SCISSORS,
         lambda r: in_range(shf, r["shf_min"], r["shf_max"]),
@@ -468,7 +344,6 @@ def calculate_internika(shf, vsf, side, system, response_profile, decor_color):
     else:
         warnings.append("Не найдены ножницы на створке по ширине.")
 
-    # Ножницы на раме
     frame_scissors = find_first(
         FRAME_SCISSORS,
         lambda r: (
@@ -483,7 +358,6 @@ def calculate_internika(shf, vsf, side, system, response_profile, decor_color):
     else:
         warnings.append("Не найдены ножницы на раме по системе, стороне и ширине.")
 
-    # Средний запор
     middle_lock = find_first(
         MIDDLE_LOCKS,
         lambda r: (
@@ -496,13 +370,11 @@ def calculate_internika(shf, vsf, side, system, response_profile, decor_color):
         add_item(items, middle_lock["sku"], middle_lock["name"], 1)
         regular_response_qty += middle_lock["response_qty"]
 
-    # Петли и блокиратор
     add_item(items, "1077266", "Петля на раме верхняя 3 мм со штифтом", 1)
     add_item(items, "1077265", "Петля на раме нижняя 3 мм", 1)
     add_item(items, "1077263", "Петля на створке нижняя 3 мм", 1)
     add_item(items, "1089062", "Блокиратор откидывания", 1)
 
-    # Ответные планки
     profile = RESPONSE_PLATE_PROFILES.get(response_profile)
 
     if profile:
@@ -516,7 +388,6 @@ def calculate_internika(shf, vsf, side, system, response_profile, decor_color):
     else:
         warnings.append("Не найден профиль ответных планок.")
 
-    # Декоративные накладки
     if decor_color in DECOR_KITS:
         add_item(
             items,
@@ -701,40 +572,57 @@ async def get_decor_color(message: Message, state: FSMContext):
 
 
 # =========================
-# Healthcheck server for Render
+# Webhook server
 # =========================
 
 async def healthcheck(request):
     return web.Response(text="Internika Telegram Bot is running")
 
 
-async def start_web_server():
+async def telegram_webhook(request):
+    try:
+        data = await request.json()
+        update = Update.model_validate(data, context={"bot": bot})
+        await dp.feed_update(bot, update)
+    except Exception as exc:
+        print(f"Webhook error: {exc}")
+
+    return web.Response(text="OK")
+
+
+async def on_startup(app):
+    webhook_full_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_webhook(
+        url=webhook_full_url,
+        drop_pending_updates=True,
+    )
+
+    print(f"Webhook set to: {webhook_full_url}")
+
+
+async def on_shutdown(app):
+    await bot.session.close()
+    print("Bot session closed")
+
+
+def create_app():
     app = web.Application()
+
     app.router.add_get("/", healthcheck)
     app.router.add_get("/health", healthcheck)
+    app.router.add_post(WEBHOOK_PATH, telegram_webhook)
 
-    runner = web.AppRunner(app)
-    await runner.setup()
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
 
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-
-    print(f"Web server started on port {PORT}")
-
-
-# =========================
-# Main
-# =========================
-
-async def main():
-    await bot.delete_webhook(drop_pending_updates=True)
-
-    await start_web_server()
-
-    print("Bot started")
-
-    await dp.start_polling(bot)
+    return app
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    web.run_app(
+        create_app(),
+        host="0.0.0.0",
+        port=PORT,
+    )
